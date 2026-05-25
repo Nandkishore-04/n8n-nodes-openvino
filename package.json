@@ -1,0 +1,46 @@
+{
+  "name": "n8n-nodes-openvino",
+  "version": "0.1.0",
+  "description": "n8n custom nodes for OpenVINO Model Server — agentic AI workflows for Intel AI PCs (CPU/GPU/NPU)",
+  "keywords": [
+    "n8n-community-node-package",
+    "openvino",
+    "ovms",
+    "ai",
+    "agent",
+    "intel",
+    "gpu",
+    "npu",
+    "local-ai"
+  ],
+  "license": "Apache-2.0",
+  "author": {
+    "name": "Nand Kishore R"
+  },
+  "main": "dist/nodes/OpenVinoModelServer/OpenVinoModelServer.node.js",
+  "scripts": {
+    "build": "tsc && find nodes -name '*.svg' -exec cp --parents {} dist/ \\;",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/OpenVinoModelServerApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/OpenVinoModelServer/OpenVinoModelServer.node.js"
+    ]
+  },
+  "files": [
+    "dist"
+  ],
+  "devDependencies": {
+    "@types/node": "^25.3.1",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "n8n-core": "^1.122.16",
+    "n8n-workflow": "^1.120.9"
+  }
+}

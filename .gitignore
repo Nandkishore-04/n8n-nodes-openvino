@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Project planning docs (kept locally, not for the public repo)
+implementation.md
+
+# n8n local data
+.n8n/
+
+# Docker volumes
+postgres_data/
+redis_data/
+
+# Models (too large for git)
+deployment/models/*/
+
+# Processed documents
+deployment/processed/*
+deployment/incoming/*
