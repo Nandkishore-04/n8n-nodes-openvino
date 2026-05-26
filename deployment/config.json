@@ -1,0 +1,12 @@
+{
+  "model_config_list": [
+    {
+      "config": {
+        "name": "text-classifier",
+        "base_path": "/models/text-classifier",
+        "target_device": "AUTO",
+        "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
+      }
+    }
+  ]
+}
