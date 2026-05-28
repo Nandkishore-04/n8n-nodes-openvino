@@ -91,7 +91,8 @@ export class OpenVinoModelServer implements INodeType {
 				if (operation === 'predict') {
 					const transport  = this.getNodeParameter('transport', i) as string;
 					const modelName  = this.getNodeParameter('modelName', i) as string;
-					const inputData  = this.getNodeParameter('inputData', i) as object;
+					const rawInput   = this.getNodeParameter('inputData', i);
+					const inputData  = typeof rawInput === 'string' ? JSON.parse(rawInput) : rawInput;
 
 					if (transport === 'grpc') {
 						this.logger.info(`[openvino:predict] gRPC → ${credentials.grpcHost}:${credentials.grpcPort} model=${modelName}`);

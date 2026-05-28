@@ -256,11 +256,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 except (json.JSONDecodeError, TypeError):
                     return str(input_data) if input_data else None
             else:
-                instances = request_data.get("instances", [{}])
-                instance = instances[0] if instances else {}
-                if isinstance(instance, str):
-                    return instance
-                return instance.get("text", instance.get("document_text", instance.get("prompt", None)))
+                # Accept {"instances": [{"text": "..."}]} (TF Serving format)
+                instances = request_data.get("instances", [])
+                if instances:
+                    instance = instances[0]
+                    if isinstance(instance, str):
+                        return instance
+                    return instance.get("text", instance.get("document_text", instance.get("prompt")))
+                # Also accept {"text": "..."} directly (simple format from n8n node)
+                return request_data.get("text", request_data.get("document_text", request_data.get("prompt")))
         except Exception:
             return None
 
