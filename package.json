@@ -21,6 +21,9 @@
   "scripts": {
     "build": "tsc && find nodes -name '*.svg' -exec cp --parents {} dist/ \\; && find nodes -name '*.proto' -exec cp --parents {} dist/ \\;",
     "dev": "tsc --watch",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "prepublishOnly": "npm run build"
   },
   "n8n": {
@@ -36,7 +39,10 @@
     "dist"
   ],
   "devDependencies": {
+    "@types/jest": "^30.0.0",
     "@types/node": "^25.3.1",
+    "jest": "^30.4.2",
+    "ts-jest": "^29.4.11",
     "typescript": "^5.9.3"
   },
   "dependencies": {

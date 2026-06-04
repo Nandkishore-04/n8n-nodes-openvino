@@ -12,7 +12,7 @@ import { OvmsGrpcClient } from './grpc/client';
 // ── Error classifier ──────────────────────────────────────────────────────────
 // Inspects raw errors and returns a user-friendly message for n8n UI display.
 
-function classifyOvmsError(err: Error, ctx: {
+export function classifyOvmsError(err: Error, ctx: {
 	transport: string;
 	modelName?: string;
 	gatewayUrl?: string;
