@@ -13,7 +13,8 @@ services:
   # W1: text-classifier (DistilBERT)
   # W4+: ppocr-det, ppocr-rec, bsrgan, bge-small-en
   ovms:
-    image: docker.io/openvino/model_server:latest-gpu
+    # Pinned by digest for reproducibility (= openvino/model_server:latest-gpu, OVMS 2026.1.0 as of 2026-06-04)
+    image: docker.io/openvino/model_server@sha256:22f92a1a5ad6784384e47296c43bde239887a623e75de45b0e1802659de416a6
     container_name: ovms
     restart: unless-stopped
     ports:
@@ -42,7 +43,8 @@ services:
   # Serves Qwen3-4B INT4 via OpenAI-compatible /v3/chat/completions
   # Auto-downloads from HuggingFace on first run (~3GB)
   ovms-llm:
-    image: docker.io/openvino/model_server:latest-gpu
+    # Same image as ovms — pinned by digest (openvino/model_server:latest-gpu, OVMS 2026.1.0)
+    image: docker.io/openvino/model_server@sha256:22f92a1a5ad6784384e47296c43bde239887a623e75de45b0e1802659de416a6
     container_name: ovms-llm
     restart: unless-stopped
     user: "0"
@@ -97,13 +99,14 @@ services:
 
   # ── PostgreSQL ────────────────────────────────────────────────────────────────
   postgres:
-    image: docker.io/postgres:15-alpine
+    # Pinned by digest (= postgres:15-alpine as of 2026-06-04)
+    image: docker.io/postgres@sha256:df7bca0066e6f60cc3dd32faa70caddec20e2c22b58932f79498e5704b23854a
     container_name: n8n-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: n8n
-      POSTGRES_USER: n8n
-      POSTGRES_PASSWORD: n8npassword
+      POSTGRES_DB: ${POSTGRES_DB:-n8n}
+      POSTGRES_USER: ${POSTGRES_USER:-n8n}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -114,7 +117,8 @@ services:
 
   # ── Qdrant ────────────────────────────────────────────────────────────────────
   qdrant:
-    image: docker.io/qdrant/qdrant:latest
+    # Pinned by digest (= qdrant/qdrant:latest as of 2026-06-04)
+    image: docker.io/qdrant/qdrant@sha256:45f8e3ddc2570a4d029877e1b5ec1045c19b3852b4e22a55c7f43b05aea0ca89
     container_name: qdrant
     restart: unless-stopped
     ports:
@@ -124,7 +128,8 @@ services:
 
   # ── n8n ───────────────────────────────────────────────────────────────────────
   n8n:
-    image: docker.io/n8nio/n8n:latest
+    # Pinned by digest (= n8nio/n8n:latest as of 2026-06-04)
+    image: docker.io/n8nio/n8n@sha256:9f1f8e4c093c9924338bd168e3f813f746041d13b337753af0dbdd329e7b50f7
     container_name: n8n-openvino
     restart: unless-stopped
     ports:
@@ -133,17 +138,22 @@ services:
       - DB_TYPE=postgresdb
       - DB_POSTGRESDB_HOST=postgres
       - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=n8n
-      - DB_POSTGRESDB_USER=n8n
-      - DB_POSTGRESDB_PASSWORD=n8npassword
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB:-n8n}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       - N8N_DIAGNOSTICS_ENABLED=false
-      - WEBHOOK_URL=http://localhost:5678/
+      # Owner-account login (n8n user management) is on by default — first visit creates the admin.
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
       - N8N_CUSTOM_EXTENSIONS=/custom-node
       - OVMS_GATEWAY_URL=http://gateway:8000
       - OVMS_LLM_URL=http://ovms-llm:8000
     volumes:
       - n8n_data:/home/node/.n8n
-      - ..:/custom-node:ro
+      # Mount only what n8n needs to load the custom node — not the whole repo (tests, docs, .git, source).
+      - ../dist:/custom-node/dist:ro
+      - ../package.json:/custom-node/package.json:ro
+      - ../node_modules:/custom-node/node_modules:ro
       - ./incoming:/data/incoming
       - ./processed:/data/processed
     depends_on:

@@ -24,6 +24,10 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:integration:stack": "bash tests/integration/run-stack.sh",
+    "lint": "eslint nodes credentials",
+    "lint:fix": "eslint nodes credentials --fix",
     "prepublishOnly": "npm run build"
   },
   "n8n": {
@@ -41,6 +45,10 @@
   "devDependencies": {
     "@types/jest": "^30.0.0",
     "@types/node": "^25.3.1",
+    "@typescript-eslint/eslint-plugin": "^8.60.1",
+    "@typescript-eslint/parser": "^8.60.1",
+    "eslint": "^8.57.1",
+    "eslint-plugin-n8n-nodes-base": "^1.16.6",
     "jest": "^30.4.2",
     "ts-jest": "^29.4.11",
     "typescript": "^5.9.3"
