@@ -58,6 +58,24 @@ def load_tokenizers():
             print(f"  FAILED: {e}")
 
 
+def warm_up():
+    """Fire one dummy inference per model so the first real request isn't slow.
+    Best-effort: never blocks startup if OVMS isn't ready yet."""
+    for model_name in MODELS:
+        if model_name not in tokenizers:
+            continue
+        try:
+            tokens = tokenizers[model_name]("warmup", return_tensors="np", padding=True, truncation=True)
+            payload = {"instances": [{
+                "input_ids": tokens["input_ids"].tolist()[0],
+                "attention_mask": tokens["attention_mask"].tolist()[0],
+            }]}
+            requests.post(f"{OVMS_URL}/v1/models/{model_name}:predict", json=payload, timeout=10)
+            print(f"  Warmed up '{model_name}'")
+        except Exception as e:
+            print(f"  Warm-up skipped for '{model_name}' (OVMS not ready yet): {e}")
+
+
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -297,6 +315,9 @@ def main():
     print("")
 
     load_tokenizers()
+    print("")
+    print("  Warming up models...")
+    warm_up()
     print("")
 
     print(f"  Gateway ready on port {PORT}")

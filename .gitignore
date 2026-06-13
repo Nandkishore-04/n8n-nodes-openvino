@@ -35,3 +35,7 @@ deployment/models/*/
 # Pipeline I/O
 deployment/incoming/*
 deployment/processed/*
+
+# Stray logs
+kernel.errors.txt
+*.errors.txt

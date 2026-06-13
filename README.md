@@ -59,6 +59,21 @@ podman-compose up -d
 
 The stack: OVMS (classic + LLM), a Python gateway, Postgres, Qdrant, and n8n — six containers, all local.
 
+### Models
+
+Model IRs live under `deployment/models/` and are **gitignored** (too large for git). Fetch them:
+
+```bash
+# enhancement model (Open Model Zoo)
+omz_downloader --name text-image-super-resolution-0001 -o /tmp/omz
+mkdir -p deployment/models/text-sr/1
+cp /tmp/omz/intel/text-image-super-resolution-0001/FP32/text-image-super-resolution-0001.{xml,bin} deployment/models/text-sr/1/
+# (rename to model.xml / model.bin)
+```
+
+PP-OCRv5, DistilBERT, and BGE IRs come pre-converted (see `docs/` for conversion steps). The LLM
+(`OpenVINO/Qwen3-4B-int4-ov`) auto-downloads on first `ovms-llm` start.
+
 ---
 
 ## Status
