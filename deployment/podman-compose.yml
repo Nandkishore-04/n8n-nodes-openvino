@@ -62,7 +62,8 @@ services:
       --task text_generation
       --rest_port 8000
       --cache_size 2
-      --tool_parser qwen3
+    # NOTE: --tool_parser qwen3 removed — unsupported by this OVMS build and it breaks ALL
+    # chat requests. Tool calling (W6 agent) needs a supported parser or newer OVMS; revisit then.
     mem_limit: 6g
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/v3/models || exit 1"]
@@ -70,6 +71,35 @@ services:
       timeout: 15s
       retries: 10
       start_period: 180s
+
+  # ── OVMS Embeddings ──────────────────────────────────────────────────────────
+  # Serves BGE-small-en via OpenAI-compatible /v3/embeddings (for RAG).
+  # Auto-downloads from HuggingFace on first run.
+  ovms-embeddings:
+    image: docker.io/openvino/model_server@sha256:22f92a1a5ad6784384e47296c43bde239887a623e75de45b0e1802659de416a6
+    container_name: ovms-embeddings
+    restart: unless-stopped
+    user: "0"
+    ports:
+      - "8082:8000"
+    devices:
+      - /dev/dri
+    group_add:
+      - "${RENDER_GROUP_ID:-992}"
+    volumes:
+      - ovms_emb_models:/models:rw
+    command: >
+      --source_model OpenVINO/bge-base-en-v1.5-int8-ov
+      --model_repository_path /models
+      --task embeddings
+      --rest_port 8000
+    mem_limit: 3g
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v3/models || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 120s
 
   # ── Gateway ───────────────────────────────────────────────────────────────────
   # Python preprocessor: tokenization, pre/post processing, /v1→/v3 proxy
@@ -84,10 +114,12 @@ services:
     environment:
       - OVMS_URL=http://ovms:9001
       - OVMS_LLM_URL=http://ovms-llm:8000
+      - OVMS_EMB_URL=http://ovms-embeddings:8000
       - TOKENIZER_PATH=/models/tokenizer
       - GATEWAY_PORT=8000
     volumes:
       - ./models/tokenizer-backup:/models/tokenizer:ro
+      - ./models/ppocr-v5-en-dict.txt:/models/ppocr-v5-en-dict.txt:ro
     depends_on:
       ovms:
         condition: service_healthy
@@ -146,6 +178,8 @@ services:
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
       - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
       - N8N_CUSTOM_EXTENSIONS=/custom-node
+      # Allow file nodes (Read/Write Files, Local File Trigger) to access the pipeline I/O dirs
+      - N8N_RESTRICT_FILE_ACCESS_TO=/data
       - OVMS_GATEWAY_URL=http://gateway:8000
       - OVMS_LLM_URL=http://ovms-llm:8000
     volumes:
@@ -156,6 +190,8 @@ services:
       - ../node_modules:/custom-node/node_modules:ro
       - ./incoming:/data/incoming
       - ./processed:/data/processed
+      # User's demo watch folder (host) → /data/proj-demo (container)
+      - /home/nandyy/Documents/proj-demo:/data/proj-demo
     depends_on:
       postgres:
         condition: service_healthy
@@ -166,4 +202,5 @@ volumes:
   postgres_data:
   n8n_data:
   ovms_llm_models:
+  ovms_emb_models:
   qdrant_data:

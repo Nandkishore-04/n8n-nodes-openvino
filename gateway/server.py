@@ -26,6 +26,7 @@ from transformers import AutoTokenizer
 
 OVMS_URL = os.environ.get("OVMS_URL", "http://localhost:9001")
 OVMS_LLM_URL = os.environ.get("OVMS_LLM_URL", "http://ovms-llm:8000")
+OVMS_EMB_URL = os.environ.get("OVMS_EMB_URL", "http://ovms-embeddings:8000")
 TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", "/models/tokenizer")
 PORT = int(os.environ.get("GATEWAY_PORT", "8000"))
 
@@ -74,6 +75,15 @@ def warm_up():
             print(f"  Warmed up '{model_name}'")
         except Exception as e:
             print(f"  Warm-up skipped for '{model_name}' (OVMS not ready yet): {e}")
+
+
+def _aggregate_confidence(pages):
+    """Text-length-weighted mean confidence across PDF pages (text-layer pages = 1.0)."""
+    total_len = sum(len(p["text"]) for p in pages)
+    if total_len == 0:
+        return 0.0
+    weighted = sum(p.get("confidence", 0.0) * len(p["text"]) for p in pages)
+    return round(weighted / total_len, 4)
 
 
 # ─── HTTP Handler ─────────────────────────────────────────────────────────────
@@ -141,7 +151,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     f"{OVMS_LLM_URL}/v3/chat/completions",
                     json=request_data,
                     headers={"Content-Type": "application/json"},
-                    timeout=120,
+                    # Qwen3 on CPU is ~7 tok/s; large contexts (multi-page docs) can take minutes.
+                    timeout=int(os.environ.get("LLM_PROXY_TIMEOUT", "600")),
                 )
                 self.send_response(resp.status_code)
                 self.send_header("Content-Type", "application/json")
@@ -149,6 +160,34 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self.wfile.write(resp.content)
             except Exception as e:
                 self.send_error_json(502, f"OVMS-LLM proxy failed: {e}")
+            return
+
+        # POST /v1/responses — shim for the OpenAI "Responses API" (n8n's built-in agent uses it).
+        # OVMS only speaks chat/completions, so translate request → chat, response → responses shape.
+        if path == "/v1/responses":
+            self.handle_responses(request_data)
+            return
+
+        # POST /v1/embeddings → OVMS-Embeddings /v3/embeddings (BGE, OpenAI-compatible) for RAG
+        if path == "/v1/embeddings":
+            try:
+                resp = requests.post(
+                    f"{OVMS_EMB_URL}/v3/embeddings",
+                    json=request_data,
+                    headers={"Content-Type": "application/json"},
+                    timeout=60,
+                )
+                self.send_response(resp.status_code)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(resp.content)
+            except Exception as e:
+                self.send_error_json(502, f"Embeddings proxy failed: {e}")
+            return
+
+        # POST /v1/document/infer — PDF/image → PP-OCRv5 → {text, boxes, confidence}
+        if path == "/v1/document/infer":
+            self.handle_document(request_data)
             return
 
         device_hint = self.headers.get("X-Target-Device", "AUTO")
@@ -166,6 +205,152 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error_json(404, f"Unknown endpoint: {path}")
+
+    def _messages_from_responses(self, data):
+        """Build chat messages from an OpenAI Responses-API request (string | message list)."""
+        messages = []
+        instr = data.get("instructions")
+        if instr:
+            messages.append({"role": "system", "content": str(instr)})
+        inp = data.get("input")
+        if isinstance(inp, str):
+            messages.append({"role": "user", "content": inp})
+        elif isinstance(inp, list):
+            for item in inp:
+                if isinstance(item, str):
+                    messages.append({"role": "user", "content": item})
+                elif isinstance(item, dict):
+                    role = item.get("role", "user")
+                    if role == "developer":
+                        role = "system"
+                    content = item.get("content")
+                    if isinstance(content, list):
+                        text = " ".join(c.get("text", "") for c in content if isinstance(c, dict))
+                    else:
+                        text = str(content)
+                    messages.append({"role": role, "content": text})
+        return messages
+
+    def handle_responses(self, data):
+        """OpenAI Responses API shim → chat/completions on OVMS-LLM, response re-shaped to Responses."""
+        messages = self._messages_from_responses(data)
+        body = {
+            "model": data.get("model"),
+            "messages": messages,
+            "temperature": data.get("temperature", 0.7),
+            "max_tokens": data.get("max_output_tokens", data.get("max_tokens", 512)),
+        }
+        try:
+            r = requests.post(
+                f"{OVMS_LLM_URL}/v3/chat/completions", json=body,
+                timeout=int(os.environ.get("LLM_PROXY_TIMEOUT", "600")),
+            )
+            cc = r.json()
+        except Exception as e:
+            self.send_error_json(502, f"responses shim failed: {e}")
+            return
+
+        import re
+        content = cc.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = re.sub(r"^\s*<think>[\s\S]*?</think>\s*", "", content).strip()
+        usage = cc.get("usage", {})
+        self.send_json({
+            "id": f"resp_{int(time.time() * 1000)}",
+            "object": "response",
+            "created_at": int(time.time()),
+            "model": cc.get("model", data.get("model")),
+            "status": "completed",
+            "output": [{
+                "type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": content, "annotations": []}],
+            }],
+            "output_text": content,
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("total_tokens", 0),
+            },
+        })
+        print(f"  -> /v1/responses shim → {usage.get('total_tokens', 0)} tokens")
+
+    def handle_document(self, request_data):
+        """PDF/image (base64) → PP-OCRv5 → {text, boxes, confidence}.
+        Body: { data: <base64>, filename?: str, dpi?: int }
+        """
+        import base64
+        b64 = request_data.get("data") or request_data.get("image_b64")
+        if not b64:
+            self.send_error_json(400, "Send base64 file bytes in 'data'.")
+            return
+        try:
+            raw = base64.b64decode(b64)
+        except Exception as e:
+            self.send_error_json(400, f"Invalid base64: {e}")
+            return
+
+        filename = (request_data.get("filename") or "").lower()
+        # OCR fallback renders at a higher DPI than 150 — dense text needs it to stay legible.
+        ocr_dpi = int(request_data.get("dpi", 200))
+        is_pdf = filename.endswith(".pdf") or raw[:5] == b"%PDF-"
+        # A page with at least this many embedded characters is treated as a digital
+        # (text-layer) page — extracted directly. Below it, the page is assumed scanned → OCR.
+        MIN_TEXT_LAYER_CHARS = 20
+
+        try:
+            from models.ppocr import run_ocr
+            import numpy as np
+            import cv2
+        except Exception as e:
+            self.send_error_json(503, f"OCR module unavailable: {e}")
+            return
+
+        start = time.time()
+        try:
+            if is_pdf:
+                import fitz  # PyMuPDF
+                doc = fitz.open(stream=raw, filetype="pdf")
+                pages = []
+                for page in doc:
+                    # Hybrid: prefer the embedded text layer (digital PDF) — instant & exact.
+                    embedded = page.get_text().strip()
+                    if len(embedded) >= MIN_TEXT_LAYER_CHARS:
+                        pages.append({"text": embedded, "source": "text-layer", "confidence": 1.0, "boxes": []})
+                        continue
+                    # No usable text layer → scanned page → OCR at higher DPI.
+                    try:
+                        pix = page.get_pixmap(dpi=ocr_dpi)
+                        arr = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width, pix.n)
+                        bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR) if pix.n >= 3 else cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+                        p = run_ocr(bgr)
+                        p["source"] = "ocr"
+                        pages.append(p)
+                    except Exception as e:  # isolate per-page failure
+                        pages.append({"text": "", "source": "ocr-failed", "confidence": 0.0, "boxes": [], "error": str(e)})
+
+                result = {
+                    "pages": pages,
+                    "text": "\n\n".join(p["text"] for p in pages if p["text"].strip()),
+                    "page_count": len(pages),
+                    "confidence": _aggregate_confidence(pages),
+                    "source": "text-layer" if all(p.get("source") == "text-layer" for p in pages) else "mixed",
+                }
+            else:
+                arr = np.frombuffer(raw, np.uint8)
+                bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if bgr is None:
+                    self.send_error_json(400, "Could not decode image bytes.")
+                    return
+                result = run_ocr(bgr)
+                result["source"] = "ocr"
+        except Exception as e:
+            self.send_error_json(502, f"OCR failed: {e}")
+            return
+
+        result["inference_time_ms"] = round((time.time() - start) * 1000, 2)
+        self.send_json(result)
+        n = result.get("page_count", len(result.get("boxes", [])))
+        print(f"  -> document [{result.get('source')}]: {n} page(s)/region(s), "
+              f"conf={result.get('confidence')} in {result['inference_time_ms']:.0f}ms")
 
     def handle_inference(self, model_name, request_data, device_hint, api_version):
         # Check if we have a tokenizer for this model

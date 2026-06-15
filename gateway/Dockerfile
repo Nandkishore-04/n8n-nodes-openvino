@@ -6,5 +6,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY server.py .
+COPY models/ ./models/
 EXPOSE 8000
 CMD ["python", "-u", "server.py"]

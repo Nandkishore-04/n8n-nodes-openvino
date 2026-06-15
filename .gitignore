@@ -39,3 +39,9 @@ deployment/processed/*
 # Stray logs
 kernel.errors.txt
 *.errors.txt
+
+# Personal / sample documents in the repo root (not for the public repo)
+/*.pdf
+/*.jpeg
+/*.jpg
+/*.png

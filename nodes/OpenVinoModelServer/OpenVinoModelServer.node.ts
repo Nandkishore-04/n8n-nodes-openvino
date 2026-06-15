@@ -134,6 +134,86 @@ export class OpenVinoModelServer implements INodeType {
 				},
 			},
 
+			// ── Document Inference params ─────────────────────────────────────────
+			{
+				displayName: 'Binary Property',
+				name: 'binaryProperty',
+				type: 'string',
+				default: 'data',
+				description: 'Name of the binary property holding the PDF/image to OCR',
+				displayOptions: {
+					show: { operation: ['documentInference'] },
+				},
+			},
+			{
+				displayName: 'PDF DPI',
+				name: 'dpi',
+				type: 'number',
+				default: 200,
+				description: 'Render resolution for SCANNED PDF pages that need OCR (digital PDFs use the text layer directly, ignoring this)',
+				displayOptions: {
+					show: { operation: ['documentInference'] },
+				},
+			},
+
+			// ── Chat Completion params ────────────────────────────────────────────
+			{
+				displayName: 'LLM Model',
+				name: 'llmModel',
+				type: 'string',
+				default: 'OpenVINO/Qwen3-4B-int4-ov',
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+			{
+				displayName: 'System Prompt',
+				name: 'systemPrompt',
+				type: 'string',
+				typeOptions: { rows: 3 },
+				default: '',
+				description: 'Optional system instruction (e.g. "Extract the vendor, date and total as JSON")',
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+			{
+				displayName: 'User Message',
+				name: 'userMessage',
+				type: 'string',
+				typeOptions: { rows: 4 },
+				default: '',
+				description: 'The prompt / document text to send to the model',
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+			{
+				displayName: 'No-Think Mode',
+				name: 'noThink',
+				type: 'boolean',
+				default: true,
+				description: 'Whether to append /no_think so Qwen3 answers directly instead of emitting reasoning (faster)',
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+			{
+				displayName: 'Temperature',
+				name: 'temperature',
+				type: 'number',
+				typeOptions: { minValue: 0, maxValue: 2, numberPrecision: 2 },
+				default: 0.7,
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+			{
+				displayName: 'Max Tokens',
+				name: 'maxTokens',
+				type: 'number',
+				default: 512,
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+			{
+				displayName: 'Return Full Response',
+				name: 'returnFull',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to return the raw OpenAI-style response. Off returns just the assistant message text.',
+				displayOptions: { show: { operation: ['chatCompletion'] } },
+			},
+
 			// ── AUTO plugin ───────────────────────────────────────────────────────
 			{
 				displayName: 'Target Device',
@@ -271,10 +351,65 @@ export class OpenVinoModelServer implements INodeType {
 						});
 					}
 
-				// ── stubs (W4-W5) ──────────────────────────────────────────────────
+				// ── documentInference (OCR via gateway) ─────────────────────────────
+				} else if (operation === 'documentInference') {
+					const binaryProperty = this.getNodeParameter('binaryProperty', i) as string;
+					const dpi = this.getNodeParameter('dpi', i) as number;
+					const binary = this.helpers.assertBinaryData(i, binaryProperty);
+					const buffer = await this.helpers.getBinaryDataBuffer(i, binaryProperty);
+
+					this.logger.info(`[openvino:documentInference] ${binary.fileName ?? 'file'} → ${credentials.gatewayUrl}/v1/document/infer`);
+					result = await this.helpers.httpRequest({
+						method: 'POST',
+						url: `${credentials.gatewayUrl}/v1/document/infer`,
+						headers: restHeaders,
+						body: {
+							data: buffer.toString('base64'),
+							filename: binary.fileName ?? '',
+							dpi,
+						},
+						json: true,
+						timeout: timeoutSec * 1000,
+					});
+
+				// ── chatCompletion (LLM via gateway → OVMS-LLM) ──────────────────────
+				} else if (operation === 'chatCompletion') {
+					const llmModel = this.getNodeParameter('llmModel', i) as string;
+					const systemPrompt = this.getNodeParameter('systemPrompt', i) as string;
+					let userMessage = this.getNodeParameter('userMessage', i) as string;
+					const noThink = this.getNodeParameter('noThink', i) as boolean;
+					const temperature = this.getNodeParameter('temperature', i) as number;
+					const maxTokens = this.getNodeParameter('maxTokens', i) as number;
+					const returnFull = this.getNodeParameter('returnFull', i) as boolean;
+
+					if (noThink) userMessage = `${userMessage} /no_think`;
+					const messages: Array<{ role: string; content: string }> = [];
+					if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+					messages.push({ role: 'user', content: userMessage });
+
+					this.logger.info(`[openvino:chatCompletion] ${llmModel} → ${credentials.gatewayUrl}/v1/chat/completions`);
+					const resp = await this.helpers.httpRequest({
+						method: 'POST',
+						url: `${credentials.gatewayUrl}/v1/chat/completions`,
+						headers: restHeaders,
+						body: { model: llmModel, messages, temperature, max_tokens: maxTokens },
+						json: true,
+						timeout: timeoutSec * 1000,
+					}) as any;
+
+					if (returnFull) {
+						result = resp;
+					} else {
+						let content = resp?.choices?.[0]?.message?.content ?? '';
+						// strip a leading <think>…</think> block if the model still emitted one
+						content = content.replace(/^\s*<think>[\s\S]*?<\/think>\s*/, '').trim();
+						result = { content, usage: resp?.usage, model: resp?.model };
+					}
+
+				// ── stubs ──────────────────────────────────────────────────────────
 				} else {
-					this.logger.info(`[openvino:${operation}] stub — full implementation in W4/W5`);
-					result = { _stub: true, operation, note: 'documentInference lands W4, embeddings + chatCompletion land W5' };
+					this.logger.info(`[openvino:${operation}] stub — embeddings lands W5`);
+					result = { _stub: true, operation, note: 'embeddings lands W5' };
 				}
 
 				results.push({ json: result as unknown as IDataObject, pairedItem: { item: i } });

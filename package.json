@@ -36,7 +36,8 @@
       "dist/credentials/OpenVinoModelServerApi.credentials.js"
     ],
     "nodes": [
-      "dist/nodes/OpenVinoModelServer/OpenVinoModelServer.node.js"
+      "dist/nodes/OpenVinoModelServer/OpenVinoModelServer.node.js",
+      "dist/nodes/OpenVinoAgent/OpenVinoAgent.node.js"
     ]
   },
   "files": [

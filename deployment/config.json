@@ -15,6 +15,22 @@
         "target_device": "AUTO",
         "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
       }
+    },
+    {
+      "config": {
+        "name": "ppocr-det",
+        "base_path": "/models/ppocr-det",
+        "target_device": "AUTO",
+        "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
+      }
+    },
+    {
+      "config": {
+        "name": "ppocr-rec",
+        "base_path": "/models/ppocr-rec",
+        "target_device": "AUTO",
+        "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
+      }
     }
   ]
 }
