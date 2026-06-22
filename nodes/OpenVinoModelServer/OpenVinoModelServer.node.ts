@@ -155,6 +155,16 @@ export class OpenVinoModelServer implements INodeType {
 					show: { operation: ['documentInference'] },
 				},
 			},
+			{
+				displayName: 'Enhance (Super-Resolution)',
+				name: 'enhance',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to run low-quality IMAGES through text-sr super-resolution before OCR. Used by the low-confidence retry pass; the result is only kept if it reads better.',
+				displayOptions: {
+					show: { operation: ['documentInference'] },
+				},
+			},
 
 			// ── Chat Completion params ────────────────────────────────────────────
 			{
@@ -355,10 +365,11 @@ export class OpenVinoModelServer implements INodeType {
 				} else if (operation === 'documentInference') {
 					const binaryProperty = this.getNodeParameter('binaryProperty', i) as string;
 					const dpi = this.getNodeParameter('dpi', i) as number;
+					const enhance = this.getNodeParameter('enhance', i, false) as boolean;
 					const binary = this.helpers.assertBinaryData(i, binaryProperty);
 					const buffer = await this.helpers.getBinaryDataBuffer(i, binaryProperty);
 
-					this.logger.info(`[openvino:documentInference] ${binary.fileName ?? 'file'} → ${credentials.gatewayUrl}/v1/document/infer`);
+					this.logger.info(`[openvino:documentInference] ${binary.fileName ?? 'file'}${enhance ? ' (enhance)' : ''} → ${credentials.gatewayUrl}/v1/document/infer`);
 					result = await this.helpers.httpRequest({
 						method: 'POST',
 						url: `${credentials.gatewayUrl}/v1/document/infer`,
@@ -367,6 +378,7 @@ export class OpenVinoModelServer implements INodeType {
 							data: buffer.toString('base64'),
 							filename: binary.fileName ?? '',
 							dpi,
+							enhance,
 						},
 						json: true,
 						timeout: timeoutSec * 1000,

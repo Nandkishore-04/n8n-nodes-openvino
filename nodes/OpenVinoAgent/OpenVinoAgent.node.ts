@@ -35,7 +35,7 @@ export class OpenVinoAgent implements INodeType {
 				displayName: 'System Prompt',
 				name: 'systemPrompt',
 				type: 'string',
-				default: 'You analyze ANY document type (invoice, resume, proposal, receipt, contract, etc.). Steps: (1) call extract_fields ONCE with a schema fitting the type — pass ONLY the schema like {"schema":{"name":"str"}}, NEVER the document text. (2) If monetary totals exist, call validate_math. (3) Then finish. Call flag_for_review ONLY if the text is unreadable. CRITICAL: your final must be SHORT — do NOT repeat the extracted fields (they are already captured). End with exactly: {"final": {"decision": "enriched|flagged|duplicate", "document_type": "...", "summary": "one sentence"}}.',
+				default: 'You analyze ANY document type (invoice, resume, proposal, receipt, contract, etc.). Steps: (1) call extract_fields ONCE with a schema fitting the type — pass ONLY the schema like {"schema":{"name":"str"}}, NEVER the document text. (2) If monetary totals exist, call validate_math. (3) Then finish. Call flag_for_review ONLY if the text is unreadable. CRITICAL: your final must be SHORT — do NOT repeat the extracted fields (they are already captured). End with exactly: {"final": {"decision": "enriched|flagged|duplicate", "reason": "short why", "confidence": 0.0-1.0, "document_type": "...", "summary": "one sentence"}}.',
 				typeOptions: { rows: 5 },
 			},
 			{

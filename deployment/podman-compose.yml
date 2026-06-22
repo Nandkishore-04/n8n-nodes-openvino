@@ -139,6 +139,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-n8n}
       POSTGRES_USER: ${POSTGRES_USER:-n8n}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    # Exposed to host so the local dashboard (web/) can read pipeline_documents.
+    # Local/demo only — on a shared deploy, read via an n8n endpoint instead.
+    ports:
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -180,6 +184,8 @@ services:
       - N8N_CUSTOM_EXTENSIONS=/custom-node
       # Allow file nodes (Read/Write Files, Local File Trigger) to access the pipeline I/O dirs
       - N8N_RESTRICT_FILE_ACCESS_TO=/data
+      # Allow the Code node to use Node's fs (move files) + crypto (sha256 dedup hash)
+      - NODE_FUNCTION_ALLOW_BUILTIN=fs,crypto
       - OVMS_GATEWAY_URL=http://gateway:8000
       - OVMS_LLM_URL=http://ovms-llm:8000
     volumes:

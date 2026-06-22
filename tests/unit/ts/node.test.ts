@@ -35,7 +35,11 @@ function makeCtx(params: Record<string, unknown>, httpResponse: unknown, opts: {
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ name: 'OpenVINO Model Server' }),
 		logger: { info: jest.fn(), debug: jest.fn(), warn: jest.fn(), error: jest.fn() },
-		helpers: { httpRequest },
+		helpers: {
+			httpRequest,
+			assertBinaryData: () => ({ fileName: 'invoice.png', mimeType: 'image/png' }),
+			getBinaryDataBuffer: async () => Buffer.from('fake-image-bytes'),
+		},
 	};
 	return { ctx, httpRequest };
 }
@@ -165,10 +169,62 @@ describe('OpenVinoModelServer.execute — error handling', () => {
 	});
 });
 
-describe('OpenVinoModelServer.execute — stubs', () => {
-	it('returns a stub marker for documentInference', async () => {
+describe('OpenVinoModelServer.execute — documentInference (OCR)', () => {
+	it('reads binary data, base64-encodes it, and POSTs to /v1/document/infer', async () => {
+		const { ctx, httpRequest } = makeCtx(
+			{ operation: 'documentInference', binaryProperty: 'data', dpi: 150, targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60 },
+			{ text: 'INVOICE', confidence: 0.9, boxes: [] },
+		);
+		const result = await node.execute.call(ctx);
+
+		const callArg = httpRequest.mock.calls[0][0];
+		expect(callArg.url).toBe('http://gateway:8000/v1/document/infer');
+		expect(callArg.body.data).toBe(Buffer.from('fake-image-bytes').toString('base64'));
+		expect(callArg.body.filename).toBe('invoice.png');
+		expect(callArg.body.dpi).toBe(150);
+		expect(result[0][0].json.text).toBe('INVOICE');
+	});
+});
+
+describe('OpenVinoModelServer.execute — chatCompletion (LLM)', () => {
+	it('builds messages, appends /no_think, and returns the assistant content', async () => {
+		const { ctx, httpRequest } = makeCtx(
+			{
+				operation: 'chatCompletion', llmModel: 'OpenVINO/Qwen3-4B-int4-ov',
+				systemPrompt: 'Extract fields', userMessage: 'INVOICE total 100',
+				noThink: true, temperature: 0.7, maxTokens: 256, returnFull: false,
+				targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60,
+			},
+			{ choices: [{ message: { content: 'vendor: Acme' } }], usage: { total_tokens: 42 }, model: 'qwen' },
+		);
+		const result = await node.execute.call(ctx);
+
+		const body = httpRequest.mock.calls[0][0].body;
+		expect(httpRequest.mock.calls[0][0].url).toBe('http://gateway:8000/v1/chat/completions');
+		expect(body.messages[0]).toEqual({ role: 'system', content: 'Extract fields' });
+		expect(body.messages[1].content).toBe('INVOICE total 100 /no_think');
+		expect(body.max_tokens).toBe(256);
+		expect(result[0][0].json.content).toBe('vendor: Acme');
+	});
+
+	it('strips a <think> block from the content', async () => {
 		const { ctx } = makeCtx(
-			{ operation: 'documentInference', targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60 },
+			{
+				operation: 'chatCompletion', llmModel: 'm', systemPrompt: '', userMessage: 'hi',
+				noThink: false, temperature: 0.7, maxTokens: 50, returnFull: false,
+				targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60,
+			},
+			{ choices: [{ message: { content: '<think>reasoning</think>\nFinal answer' } }] },
+		);
+		const result = await node.execute.call(ctx);
+		expect(result[0][0].json.content).toBe('Final answer');
+	});
+});
+
+describe('OpenVinoModelServer.execute — stubs', () => {
+	it('returns a stub marker for embeddings', async () => {
+		const { ctx } = makeCtx(
+			{ operation: 'embeddings', targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60 },
 			null,
 		);
 		const result = await node.execute.call(ctx);

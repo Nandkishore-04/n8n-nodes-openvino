@@ -275,7 +275,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def handle_document(self, request_data):
         """PDF/image (base64) → PP-OCRv5 → {text, boxes, confidence}.
-        Body: { data: <base64>, filename?: str, dpi?: int }
+        Body: { data: <base64>, filename?: str, dpi?: int, enhance?: bool }
+        enhance=true runs raster IMAGES through text-sr super-resolution before OCR
+        (the agent's retry_document_extraction lever for low-quality images; PDFs use dpi).
         """
         import base64
         b64 = request_data.get("data") or request_data.get("image_b64")
@@ -291,6 +293,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         filename = (request_data.get("filename") or "").lower()
         # OCR fallback renders at a higher DPI than 150 — dense text needs it to stay legible.
         ocr_dpi = int(request_data.get("dpi", 200))
+        enhance = bool(request_data.get("enhance", False))
         is_pdf = filename.endswith(".pdf") or raw[:5] == b"%PDF-"
         # A page with at least this many embedded characters is treated as a digital
         # (text-layer) page — extracted directly. Below it, the page is assumed scanned → OCR.
@@ -340,8 +343,25 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if bgr is None:
                     self.send_error_json(400, "Could not decode image bytes.")
                     return
-                result = run_ocr(bgr)
-                result["source"] = "ocr"
+                if enhance:
+                    # Super-resolve, then OCR BOTH the original and the enhanced image and
+                    # keep whichever reads better. PP-OCRv5 is already robust to small/blurry
+                    # text, so SR can introduce artifacts — this guard means enhancement can
+                    # only help or be neutral, never degrade. Best-effort on any failure.
+                    base = run_ocr(bgr)
+                    try:
+                        from models.textsr import super_resolve
+                        enh = run_ocr(super_resolve(bgr, OVMS_URL))
+                        if enh.get("confidence", 0) > base.get("confidence", 0):
+                            result, result["source"] = enh, "ocr-enhanced"
+                        else:
+                            result, result["source"] = base, "ocr (enhance not better)"
+                    except Exception as e:
+                        print(f"  text-sr enhance failed, using original image: {e}")
+                        result, result["source"] = base, "ocr"
+                else:
+                    result = run_ocr(bgr)
+                    result["source"] = "ocr"
         except Exception as e:
             self.send_error_json(502, f"OCR failed: {e}")
             return

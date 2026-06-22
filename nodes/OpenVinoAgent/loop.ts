@@ -13,6 +13,10 @@ export interface AgentResult {
 	finalData?: unknown;
 	/** convenience: the routing decision, surfaced for a Switch node */
 	decision?: string;
+	/** why the agent reached this decision (for audit / metadata) */
+	reason?: string;
+	/** the agent's confidence in its decision, 0..1 (for metadata) */
+	confidence?: number;
 	/** the structured fields from the last extract_fields call (the real extracted data) */
 	extracted?: unknown;
 	iterations: Array<{ iter: number; tool?: string; args?: unknown; result?: unknown; raw: string }>;
@@ -86,6 +90,8 @@ export async function runAgent(opts: {
 				final: isObj ? JSON.stringify(fv) : String(fv),
 				finalData: isObj ? fv : undefined,
 				decision: isObj ? (fv.decision as string | undefined) : undefined,
+				reason: isObj ? (fv.reason as string | undefined) : undefined,
+				confidence: isObj && fv.confidence != null ? Number(fv.confidence) : undefined,
 				extracted,
 				iterations,
 				incomplete: false,
@@ -108,10 +114,12 @@ export async function runAgent(opts: {
 		if (/"final"\s*:/.test(raw)) {
 			iterations.push({ iter: i, raw });
 			const dec = raw.match(/"decision"\s*:\s*"(\w+)"/);
+			const rsn = raw.match(/"reason"\s*:\s*"([^"]*)"/);
 			if (extracted || dec) {
 				return {
 					final: dec ? dec[1] : 'enriched',
 					decision: dec ? dec[1] : 'enriched',
+					reason: rsn ? rsn[1] : undefined,
 					extracted,
 					iterations,
 					incomplete: false,
