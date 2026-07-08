@@ -87,6 +87,7 @@ export class OpenVinoModelServer implements INodeType {
 				noDataExpression: true,
 				options: [
 					{ name: 'Chat Completion',    value: 'chatCompletion',    description: 'Single LLM call via Qwen3-4B',          action: 'Generate a chat completion' },
+					{ name: 'Classify Document',  value: 'classifyDocument',  description: 'CLIP zero-shot triage on NPU → is this a processable document? (+confidence)', action: 'Classify a document image' },
 					{ name: 'Document Inference', value: 'documentInference', description: 'PDF/image → OCR text + bounding boxes', action: 'Extract text from a document' },
 					{ name: 'Embeddings',         value: 'embeddings',        description: 'Text → BGE-small-en vector',           action: 'Generate a text embedding' },
 					{ name: 'Get Model Status',   value: 'modelStatus',       description: 'Per-model readiness check',            action: 'Get model status' },
@@ -140,9 +141,9 @@ export class OpenVinoModelServer implements INodeType {
 				name: 'binaryProperty',
 				type: 'string',
 				default: 'data',
-				description: 'Name of the binary property holding the PDF/image to OCR',
+				description: 'Name of the binary property holding the PDF/image to OCR or classify',
 				displayOptions: {
-					show: { operation: ['documentInference'] },
+					show: { operation: ['documentInference', 'classifyDocument'] },
 				},
 			},
 			{
@@ -230,16 +231,13 @@ export class OpenVinoModelServer implements INodeType {
 				name: 'targetDevice',
 				type: 'options',
 				options: [
-					{ name: 'AUTO (Let OpenVINO Decide)', value: 'AUTO' },
-					{ name: 'AUTO: GPU → CPU',            value: 'AUTO:GPU,CPU' },
-					{ name: 'AUTO: NPU → CPU',            value: 'AUTO:NPU,CPU' },
-					{ name: 'AUTO: NPU → GPU → CPU',      value: 'AUTO:NPU,GPU,CPU' },
-					{ name: 'CPU',                        value: 'CPU' },
-					{ name: 'GPU',                        value: 'GPU' },
-					{ name: 'NPU',                        value: 'NPU' },
+					{ name: 'CPU',                         value: 'CPU' },
+					{ name: 'GPU',                         value: 'GPU' },
+					{ name: 'NPU',                         value: 'NPU' },
+					{ name: 'AUTO (Plugin — Let OpenVINO Decide)', value: 'AUTO' },
 				],
 				default: 'AUTO',
-				description: 'OpenVINO device to run inference on. AUTO lets the runtime pick based on availability.',
+				description: 'OpenVINO device to run inference on. AUTO is the AUTO plugin — it picks the best available device (and falls back to CPU).',
 			},
 			{
 				displayName: 'Performance Hint',
@@ -379,6 +377,28 @@ export class OpenVinoModelServer implements INodeType {
 							filename: binary.fileName ?? '',
 							dpi,
 							enhance,
+							device: targetDevice,
+						},
+						json: true,
+						timeout: timeoutSec * 1000,
+					});
+
+				// ── classifyDocument (CLIP zero-shot triage on NPU via gateway) ──────
+				} else if (operation === 'classifyDocument') {
+					const binaryProperty = this.getNodeParameter('binaryProperty', i) as string;
+					const binary = this.helpers.assertBinaryData(i, binaryProperty);
+					const buffer = await this.helpers.getBinaryDataBuffer(i, binaryProperty);
+
+					this.logger.info(`[openvino:classifyDocument] ${binary.fileName ?? 'file'} → ${credentials.gatewayUrl}/v1/document/infer (classify)`);
+					result = await this.helpers.httpRequest({
+						method: 'POST',
+						url: `${credentials.gatewayUrl}/v1/document/infer`,
+						headers: restHeaders,
+						body: {
+							data: buffer.toString('base64'),
+							filename: binary.fileName ?? '',
+							mode: 'classify',
+							device: targetDevice,
 						},
 						json: true,
 						timeout: timeoutSec * 1000,
@@ -424,7 +444,8 @@ export class OpenVinoModelServer implements INodeType {
 					result = { _stub: true, operation, note: 'embeddings lands W5' };
 				}
 
-				results.push({ json: result as unknown as IDataObject, pairedItem: { item: i } });
+				// carry the input binary through so a later node (e.g. OCR after Classify) still has the file
+				results.push({ json: result as unknown as IDataObject, binary: items[i].binary, pairedItem: { item: i } });
 
 			} catch (err) {
 				const friendly = classifyOvmsError(err as Error, {

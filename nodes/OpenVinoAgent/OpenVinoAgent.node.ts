@@ -35,7 +35,7 @@ export class OpenVinoAgent implements INodeType {
 				displayName: 'System Prompt',
 				name: 'systemPrompt',
 				type: 'string',
-				default: 'You analyze ANY document type (invoice, resume, proposal, receipt, contract, etc.). Steps: (1) call extract_fields ONCE with a schema fitting the type — pass ONLY the schema like {"schema":{"name":"str"}}, NEVER the document text. (2) If monetary totals exist, call validate_math. (3) Then finish. Call flag_for_review ONLY if the text is unreadable. CRITICAL: your final must be SHORT — do NOT repeat the extracted fields (they are already captured). End with exactly: {"final": {"decision": "enriched|flagged|duplicate", "reason": "short why", "confidence": 0.0-1.0, "document_type": "...", "summary": "one sentence"}}.',
+				default: 'You analyze ANY document type (invoice, receipt, resume, proposal, contract, etc.). The input is OCR or PDF text whose lines may be out of order, and where a value can appear just BEFORE or AFTER its label — reason about meaning, not line position. Steps: (1) call extract_fields ONCE with a SEMANTIC schema whose fields FIT THIS DOCUMENT\'S TYPE — e.g. proposal → {title, objectives, timeline, deliverables[]}; resume → {name, contact, skills[], experience[]}; invoice/receipt → {vendor, invoice_number, date, line_items[{description,quantity,unit_price,amount}], subtotal, tax_total, total}. Capture EVERY repeating row as an array — never summarize, omit, or stop early (an invoice with 14 line items needs all 14). If extract_fields returns a _coverage_warning, rows were dropped → re-extract capturing all rows, and if still incomplete call flag_for_review. Do NOT copy table column headers as fields, and do NOT force invoice fields onto non-invoices. Pass ONLY the schema, NEVER the document text. (2) ONLY if the document has monetary totals, call validate_totals with line_items, subtotal, tax (the TOTAL tax — sum of all GST/CGST/SGST/IGST, i.e. "Total taxes"), total (the grand total — "Invoice Total"/"Total"), total_in_words if present, and round_off if the invoice has a ROUND OFF / rounding line. It deterministically checks line items sum to subtotal, subtotal+tax=total, and the amount-in-words matches the digit total. (3) If validate_totals returns consistent:false, a number was likely mis-read — RE-CHECK those fields against the document; if still inconsistent, call flag_for_review. A soft_notes line-items difference alone is NOT a reason to flag (it is usually just per-line discounts). Then finish. Call flag_for_review if the text contains several [?] marks (illegible OCR), is genuinely unreadable, or the math is truly wrong after re-checking. CRITICAL: your final must be SHORT — do NOT repeat the extracted fields. End with exactly: {"final": {"decision": "enriched|flagged|duplicate", "reason": "short why", "confidence": 0.0-1.0, "document_type": "...", "summary": "one sentence"}}.',
 				typeOptions: { rows: 5 },
 			},
 			{
@@ -75,8 +75,8 @@ export class OpenVinoAgent implements INodeType {
 				displayName: 'Max Tokens',
 				name: 'maxTokens',
 				type: 'number',
-				default: 1024,
-				description: 'Cap per LLM turn. Higher avoids truncating extract_fields output; slower on CPU.',
+				default: 2048,
+				description: 'Cap per LLM turn. Higher avoids truncating extract_fields output (many line items); slower on CPU.',
 			},
 			{
 				displayName: 'Tool Backends',
@@ -105,6 +105,13 @@ export class OpenVinoAgent implements INodeType {
 						name: 'qdrantCollection',
 						type: 'string',
 						default: 'document_extractions',
+					},
+					{
+						displayName: 'Knowledge Collection',
+						name: 'knowledgeCollection',
+						type: 'string',
+						default: 'knowledge_base',
+						description: 'Qdrant collection holding curated reference knowledge for knowledge_search',
 					},
 					{
 						displayName: 'Qdrant URL',
@@ -184,6 +191,7 @@ export class OpenVinoAgent implements INodeType {
 					qdrant: backends.qdrantUrl
 						? { url: String(backends.qdrantUrl), collection: String(backends.qdrantCollection ?? 'document_extractions') }
 						: undefined,
+					knowledgeCollection: String(backends.knowledgeCollection ?? '') || undefined,
 				};
 
 				const tools = buildTools(ctx);

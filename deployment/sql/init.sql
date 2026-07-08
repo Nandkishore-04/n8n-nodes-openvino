@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS pipeline_documents (
   id             SERIAL PRIMARY KEY,
   file_hash      TEXT UNIQUE NOT NULL,               -- sha256 of raw bytes = dedup key
   file_name      TEXT NOT NULL,
+  mime_type      TEXT,                               -- captured at the gate, before OCR
+  file_size      BIGINT,                             -- bytes, captured at the gate
   document_type  TEXT,
   decision       TEXT,                               -- enriched | flagged | duplicate
   reason         TEXT,

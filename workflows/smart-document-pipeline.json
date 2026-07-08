@@ -1,0 +1,326 @@
+{
+  "name": "Smart Document Processing (WF1)",
+  "nodes": [
+    {
+      "parameters": { "rule": { "interval": [ { "field": "seconds" } ] } },
+      "id": "9e05aa9b-5321-457a-990b-8e615421f793",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [ -1184, 160 ]
+    },
+    {
+      "parameters": { "httpMethod": "POST", "path": "process-document", "options": {} },
+      "id": "03b5c4d0-a436-4182-a5de-2cfaaca4deae",
+      "name": "Upload Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [ -1184, 384 ],
+      "webhookId": "ab999999-9999-9999-9999-999999999999",
+      "disabled": true,
+      "notes": "POST {\"fileName\":\"x.pdf\"}. Called on upload for instant processing. Workflow must be Active for the /webhook/ URL."
+    },
+    {
+      "parameters": { "inputSource": "passthrough" },
+      "id": "3c24e79e-d9aa-458a-8cae-8400c824bdf1",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [ -1184, 608 ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "cfg-1", "name": "docRoot", "value": "C:/Users/devcloud/proj-demo", "type": "string" },
+            { "id": "cfg-2", "name": "gatewayUrl", "value": "http://127.0.0.1:8000", "type": "string" },
+            { "id": "cfg-3", "name": "qdrantUrl", "value": "http://127.0.0.1:6333", "type": "string" },
+            { "id": "cfg-4", "name": "collection", "value": "documents", "type": "string" }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "a1b2c3d4-0000-4000-8000-000000000001",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [ -1040, 288 ],
+      "notes": "EDIT THIS ONE NODE to match your machine. docRoot: base folder holding incoming/processing/processed/failed/rejected. Windows e.g. C:/Users/you/proj-demo ; Linux e.g. /data/proj-demo. gatewayUrl/qdrantUrl: where the OpenVINO gateway and Qdrant listen."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Claim a file from incoming/ -> processing/ AND fingerprint it (sha256+size+MIME) in one node.\n// fs.renameSync is atomic, so the rename doubles as a lock: two runs race -> exactly one wins.\n// Webhook: body.fileName names the file. Schedule: no name -> scan for the oldest STABLE file.\nconst fs = require('fs');\nconst crypto = require('crypto');\nconst cfg = $('Config').first().json;\nconst INCOMING = cfg.docRoot + '/incoming';\nconst PROCESSING = cfg.docRoot + '/processing';\nconst STABLE_MS = 5000;\nconst MIME = { pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', tif: 'image/tiff', tiff: 'image/tiff', bmp: 'image/bmp', webp: 'image/webp' };\n\nconst j = ($input.all()[0] || {}).json || {};\nconst target = (j.body && j.body.fileName) || j.fileName || null;\n\nfunction claim(name) {\n  const dst = PROCESSING + '/' + name;\n  try { fs.renameSync(INCOMING + '/' + name, dst); }\n  catch (e) { return null; }\n  const buf = fs.readFileSync(dst);\n  const ext = (name.split('.').pop() || '').toLowerCase();\n  return {\n    fileName: name,\n    claimedPath: dst,\n    file_hash: crypto.createHash('sha256').update(buf).digest('hex'),\n    file_size: buf.length,\n    mime_type: MIME[ext] || 'application/octet-stream',\n  };\n}\n\nif (target) {\n  const c = claim(target);\n  return c ? [{ json: c }] : [];\n}\n\nlet names = [];\ntry { names = fs.readdirSync(INCOMING); } catch (e) { return []; }\nnames.sort();\nconst now = Date.now();\nfor (const name of names) {\n  if (name.startsWith('.')) continue;\n  let st;\n  try { st = fs.statSync(INCOMING + '/' + name); } catch (e) { continue; }\n  if (!st.isFile()) continue;\n  if (now - st.mtimeMs < STABLE_MS) continue;\n  const c = claim(name);\n  if (c) return [{ json: c }];\n}\nreturn [];"
+      },
+      "id": "4b50b2d2-5bc2-4322-9823-89e17a4b3498",
+      "name": "Claim File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ -848, 288 ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO pipeline_documents (file_hash, file_name, mime_type, file_size, status) VALUES ('{{ $json.file_hash }}', '{{ String(($json.fileName) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', '{{ $json.mime_type }}', {{ Number($json.file_size) || 0 }}, 'processing') ON CONFLICT (file_hash) DO NOTHING RETURNING id;",
+        "options": {}
+      },
+      "id": "c6d8dceb-19a2-44f2-bc8a-b719039ab8de",
+      "name": "Insert Document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [ -640, 288 ],
+      "alwaysOutputData": true,
+      "credentials": { "postgres": { "id": "cxAQjPC8KcY39S5L", "name": "Postgres account" } },
+      "notes": "Atomic dedup gate: UNIQUE(file_hash) + ON CONFLICT DO NOTHING. Row returned = new doc; nothing = duplicate."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 2 },
+          "conditions": [
+            { "leftValue": "={{ $('Insert Document').first().json.id }}", "rightValue": "", "operator": { "type": "string", "operation": "notEmpty", "singleValue": true }, "id": "84f81ae3-20c2-47eb-8b39-a04fff69961e" }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": { "ignoreCase": false }
+      },
+      "id": "87676c56-94f5-448d-a7c5-9b25f9586394",
+      "name": "New Document?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ -448, 288 ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO pipeline_audit (document_id, file_name, action, actor, details) VALUES (NULL, '{{ String(($('Claim File').first().json.fileName) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', 'duplicate-skipped', 'system', '{{ JSON.stringify({ file_hash: $('Claim File').first().json.file_hash }).split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}'::jsonb) RETURNING id;",
+        "options": {}
+      },
+      "id": "e47ca87a-d06e-48e1-825f-376a9fba2637",
+      "name": "Audit: Skipped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [ -304, 528 ],
+      "credentials": { "postgres": { "id": "cxAQjPC8KcY39S5L", "name": "Postgres account" } }
+    },
+    {
+      "parameters": { "fileSelector": "={{ $('Claim File').first().json.claimedPath }}", "options": {} },
+      "id": "43c65581-dee5-4832-b432-b4af45e74cd0",
+      "name": "Read Claimed",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [ -240, 272 ]
+    },
+    {
+      "parameters": { "operation": "classifyDocument", "targetDevice": "NPU" },
+      "id": "efa89f80-d506-408f-81f5-56477ba5f00c",
+      "name": "OpenVINO Model Server",
+      "type": "CUSTOM.openVinoModelServer",
+      "typeVersion": 1,
+      "position": [ -96, 128 ],
+      "credentials": { "openVinoModelServerApi": { "id": "FgbuaiNS8y2Idy4b", "name": "OpenVINO Model Server account" } },
+      "notes": "CLIP zero-shot document triage on the NPU. Returns is_document + confidence (P(document))."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 3 },
+          "conditions": [
+            { "id": "1984ded2-6bcf-4584-9aa6-ff5cc96ac03f", "leftValue": "={{ $json.confidence >= 0.35 }}", "rightValue": "true", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ea1ed3be-25c7-485c-ba5e-d391cd22d4f2",
+      "name": "worth processing1",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [ 48, 272 ],
+      "notes": "Confidence gate, biased toward processing: only reject when the classifier is clearly sure it is NOT a document (P(doc) < 0.35)."
+    },
+    {
+      "parameters": { "fileSelector": "={{ $('Claim File').first().json.claimedPath }}", "options": {} },
+      "id": "4dfef8c9-3f0d-44b6-9e87-c55a738eb683",
+      "name": "Read Claimed1",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1.1,
+      "position": [ 160, 96 ]
+    },
+    {
+      "parameters": { "operation": "documentInference", "targetDevice": "GPU", "timeout": 300 },
+      "id": "9bde1c65-e764-4f7d-9e29-af2bba8caf33",
+      "name": "OCR (Document Inference)",
+      "type": "CUSTOM.openVinoModelServer",
+      "typeVersion": 1,
+      "position": [ 272, 96 ],
+      "credentials": { "openVinoModelServerApi": { "id": "FgbuaiNS8y2Idy4b", "name": "OpenVINO Model Server account" } }
+    },
+    {
+      "parameters": {
+        "systemPrompt": "You analyze ANY document type (invoice, receipt, resume, proposal, contract, etc.). The input is OCR or PDF text whose lines may be out of order, and where a value can appear just BEFORE or AFTER its label - reason about meaning, not line position. Steps: (1) call extract_fields ONCE with a SEMANTIC schema whose fields FIT THIS DOCUMENT'S TYPE - e.g. proposal -> {title, objectives, timeline, deliverables[]}; resume -> {name, contact, skills[], experience[]}; invoice/receipt -> {vendor, invoice_number, date, line_items[{description, quantity, unit_rate, amount}], subtotal, cgst, sgst, tax_total, round_off, total, total_in_words}. For invoice line items use EXACTLY the keys description, quantity, unit_rate, amount - where 'amount' is that line's total. Capture EVERY repeating row as an array - never summarize, omit, or stop early. If extract_fields returns a _coverage_warning, rows were dropped -> re-extract all rows, else flag_for_review. Do NOT copy table column headers as fields, and do NOT force invoice fields onto non-invoices. Pass ONLY the schema, NEVER the document text. (2) ONLY if the document has monetary totals, call validate_totals with line_items, subtotal, tax (the TOTAL tax - sum of all GST/CGST/SGST/IGST), total (the grand total), total_in_words if present, and round_off if there is a ROUND OFF line. (3) If validate_totals returns consistent:false, RE-CHECK those fields; if still inconsistent, flag_for_review. A soft_notes line-items difference alone is NOT a reason to flag. Then finish. Also flag_for_review if the text has several [?] marks or is unreadable. In your final, do NOT re-list every extracted field, but DO write a detailed summary. End with exactly: {\"final\": {\"decision\": \"enriched|flagged|duplicate\", \"reason\": \"short why\", \"confidence\": 0.0-1.0, \"document_type\": \"...\", \"summary\": \"a DETAILED 3-5 sentence summary: what the document is, its purpose, the parties/vendor involved, and the key details and amounts\"}}.",
+        "llmModel": "qwen3-8b-ov",
+        "temperature": 0.1,
+        "maxTokens": 2048,
+        "toolBackends": {}
+      },
+      "id": "a9f51fb7-3577-42eb-8234-5fa675b50b40",
+      "name": "OpenVINO Agent",
+      "type": "CUSTOM.openVinoAgent",
+      "typeVersion": 1,
+      "position": [ 480, 96 ],
+      "credentials": { "openVinoModelServerApi": { "id": "FgbuaiNS8y2Idy4b", "name": "OpenVINO Model Server account" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE pipeline_documents SET document_type = '{{ String((($('OpenVINO Agent').first().json.finalData || {}).document_type) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', decision = '{{ String(($('OpenVINO Agent').first().json.decision) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', reason = '{{ String(($('OpenVINO Agent').first().json.reason) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', confidence = {{ $('OpenVINO Agent').first().json.confidence != null ? Number($('OpenVINO Agent').first().json.confidence) : 'NULL' }}, ocr_confidence = {{ $('OCR (Document Inference)').first().json.confidence != null ? Number($('OCR (Document Inference)').first().json.confidence) : 'NULL' }}, summary = '{{ String((($('OpenVINO Agent').first().json.finalData || {}).summary) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', fields = '{{ JSON.stringify($('OpenVINO Agent').first().json.extracted || {}).split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}'::jsonb, status = '{{ ({ enriched: 'processed', flagged: 'flagged', duplicate: 'duplicate' })[$('OpenVINO Agent').first().json.decision] || 'processed' }}', updated_at = now() WHERE id = {{ $('Insert Document').first().json.id }} RETURNING id;",
+        "options": {}
+      },
+      "id": "8c62d61d-aef3-4e1c-bc41-353710c9c0bf",
+      "name": "Update Document",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [ 736, 96 ],
+      "credentials": { "postgres": { "id": "cxAQjPC8KcY39S5L", "name": "Postgres account" } }
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [ { "leftValue": "={{ $('OpenVINO Agent').first().json.decision }}", "rightValue": "enriched", "operator": { "type": "string", "operation": "equals" }, "id": "86a1ac81-050b-458f-a00a-ed778a382a61" } ], "combinator": "and" } },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [ { "leftValue": "={{ $('OpenVINO Agent').first().json.decision }}", "rightValue": "flagged", "operator": { "type": "string", "operation": "equals" }, "id": "db8c4dec-e376-41c8-86a5-d5ff44c6bf12" } ], "combinator": "and" } },
+            { "conditions": { "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 }, "conditions": [ { "leftValue": "={{ $('OpenVINO Agent').first().json.decision }}", "rightValue": "duplicate", "operator": { "type": "string", "operation": "equals" }, "id": "a2da74eb-43e2-481c-98cd-a0f35117a07b" } ], "combinator": "and" } }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "2e738b86-7991-467e-b154-0e8e9691206a",
+      "name": "Route on Decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [ 1024, 96 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split the OCR text into ~1500-char chunks (under BGE's 512-token limit) for embedding.\nconst text = $('OCR (Document Inference)').first().json.text || '';\nconst size = 1500;\nconst out = [];\nfor (let i = 0; i < text.length; i += size) {\n  out.push({ json: {\n    chunk: text.slice(i, i + size),\n    chunk_index: out.length,\n    source_file: $('Claim File').first().json.fileName,\n    decision: $('OpenVINO Agent').first().json.decision,\n  }});\n}\nreturn out;"
+      },
+      "id": "6e9497a2-c7fa-4d2e-9644-bef2e7a8656d",
+      "name": "Chunk Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 1296, -32 ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.gatewayUrl }}/v1/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'OpenVINO/bge-base-en-v1.5-int8-ov', input: $json.chunk }) }}",
+        "options": { "batching": { "batch": { "batchSize": 1, "batchInterval": 200 } } }
+      },
+      "id": "b19b532f-a040-41ef-8ee0-ae1a1daf67a6",
+      "name": "Embed (BGE)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 1504, -32 ]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "={{ $('Config').first().json.qdrantUrl }}/collections/{{ $('Config').first().json.collection }}/points",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ points: [ { id: Date.now() + $('Chunk Text').item.json.chunk_index, vector: $json.data[0].embedding, payload: { text: $('Chunk Text').item.json.chunk, chunk_index: $('Chunk Text').item.json.chunk_index, source_file: $('Chunk Text').item.json.source_file, decision: $('Chunk Text').item.json.decision, pg_id: $('Insert Document').first().json.id } } ] }) }}",
+        "options": {}
+      },
+      "id": "7e486367-c465-4972-ba9a-94ec374dc227",
+      "name": "Store in Qdrant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ 1696, -32 ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO pipeline_audit (document_id, file_name, action, actor, details) VALUES ({{ $('Insert Document').first().json.id }}, '{{ String(($('Claim File').first().json.fileName) || '').split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}', 'processed', 'system', '{{ JSON.stringify({ decision: $('OpenVINO Agent').first().json.decision, chunks: $('Chunk Text').all().length }).split(String.fromCharCode(39)).join(String.fromCharCode(39,39)) }}'::jsonb) RETURNING id;",
+        "options": {}
+      },
+      "id": "e0f08ed0-521d-4d7c-84c2-79a0065c9b6d",
+      "name": "Audit: Processed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [ 1904, -32 ],
+      "credentials": { "postgres": { "id": "cxAQjPC8KcY39S5L", "name": "Postgres account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Success: move processing/ -> processed/ (atomic, idempotent).\nconst fs = require('fs');\nconst cfg = $('Config').first().json;\nconst name = $('Claim File').first().json.fileName;\ntry { fs.renameSync(cfg.docRoot + '/processing/' + name, cfg.docRoot + '/processed/' + name); } catch (e) {}\nreturn [{ json: { moved: name, to: 'processed' } }];"
+      },
+      "id": "2811cd55-0835-458c-9b24-2ff3df3a0f91",
+      "name": "Move to Processed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 2112, 96 ]
+    },
+    {
+      "parameters": {},
+      "id": "75685d3d-a668-4097-8b6a-2e44b3bdfbf3",
+      "name": "Skip (Duplicate)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [ 1296, 400 ],
+      "notes": "Agent decided duplicate - record stays in Postgres (decision=duplicate); file moved to processed/."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fallback (unexpected agent decision): move processing/ -> failed/ for human attention. Idempotent.\nconst fs = require('fs');\nconst cfg = $('Config').first().json;\nconst name = $('Claim File').first().json.fileName;\ntry { fs.renameSync(cfg.docRoot + '/processing/' + name, cfg.docRoot + '/failed/' + name); } catch (e) {}\nreturn [{ json: { moved: name, to: 'failed' } }];"
+      },
+      "id": "8a660f98-2787-4944-b107-ae0c71366001",
+      "name": "Move to Failed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 1296, 560 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Not a processable document (CLIP triage rejected it). Move to a VISIBLE rejected/ folder so the\n// user can find and re-submit it - never a silent drop. Returns a clean 'rejected' result.\nconst fs = require('fs');\nconst cfg = $('Config').first().json;\nconst name = $('Claim File').first().json.fileName;\nconst c = $('OpenVINO Model Server').first().json;\ntry { fs.renameSync(cfg.docRoot + '/processing/' + name, cfg.docRoot + '/rejected/' + name); } catch (e) {}\nreturn [{ json: {\n  decision: 'rejected',\n  document_type: 'not_a_document',\n  summary: 'Not a processable document (' + (c.best_label || 'non-document') + ', P(doc)=' + (c.confidence != null ? c.confidence : '') + ')',\n  moved: name, to: 'rejected'\n}}];"
+      },
+      "id": "b331162d-bf75-42ea-9f21-8c0aa199b361",
+      "name": "Move to Rejected",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 432, 560 ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "Upload Webhook": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "When Executed by Another Workflow": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "Config": { "main": [ [ { "node": "Claim File", "type": "main", "index": 0 } ] ] },
+    "Claim File": { "main": [ [ { "node": "Insert Document", "type": "main", "index": 0 } ] ] },
+    "Insert Document": { "main": [ [ { "node": "New Document?", "type": "main", "index": 0 } ] ] },
+    "New Document?": { "main": [ [ { "node": "Read Claimed", "type": "main", "index": 0 } ], [ { "node": "Audit: Skipped", "type": "main", "index": 0 } ] ] },
+    "Audit: Skipped": { "main": [ [ { "node": "Move to Processed", "type": "main", "index": 0 } ] ] },
+    "Read Claimed": { "main": [ [ { "node": "OpenVINO Model Server", "type": "main", "index": 0 } ] ] },
+    "OpenVINO Model Server": { "main": [ [ { "node": "worth processing1", "type": "main", "index": 0 } ] ] },
+    "worth processing1": { "main": [ [ { "node": "Read Claimed1", "type": "main", "index": 0 } ], [ { "node": "Move to Rejected", "type": "main", "index": 0 } ] ] },
+    "Read Claimed1": { "main": [ [ { "node": "OCR (Document Inference)", "type": "main", "index": 0 } ] ] },
+    "OCR (Document Inference)": { "main": [ [ { "node": "OpenVINO Agent", "type": "main", "index": 0 } ] ] },
+    "OpenVINO Agent": { "main": [ [ { "node": "Update Document", "type": "main", "index": 0 } ] ] },
+    "Update Document": { "main": [ [ { "node": "Route on Decision", "type": "main", "index": 0 } ] ] },
+    "Route on Decision": { "main": [ [ { "node": "Chunk Text", "type": "main", "index": 0 } ], [ { "node": "Chunk Text", "type": "main", "index": 0 } ], [ { "node": "Skip (Duplicate)", "type": "main", "index": 0 } ], [ { "node": "Move to Failed", "type": "main", "index": 0 } ] ] },
+    "Chunk Text": { "main": [ [ { "node": "Embed (BGE)", "type": "main", "index": 0 } ] ] },
+    "Embed (BGE)": { "main": [ [ { "node": "Store in Qdrant", "type": "main", "index": 0 } ] ] },
+    "Store in Qdrant": { "main": [ [ { "node": "Audit: Processed", "type": "main", "index": 0 } ] ] },
+    "Audit: Processed": { "main": [ [ { "node": "Move to Processed", "type": "main", "index": 0 } ] ] },
+    "Skip (Duplicate)": { "main": [ [ { "node": "Move to Processed", "type": "main", "index": 0 } ] ] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1", "binaryMode": "separate" },
+  "meta": { "templateCredsSetupCompleted": true },
+  "tags": []
+}

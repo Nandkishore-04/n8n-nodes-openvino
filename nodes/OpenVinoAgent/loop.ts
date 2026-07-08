@@ -44,6 +44,13 @@ function extractJson(s: string): any | null {
 	return null;
 }
 
+// Detect runaway LLM degeneration (a repetition loop) so we flag for review instead of
+// looping on — or returning — thousands of tokens of garbage. A valid tool call is never this big.
+function looksDegenerate(s: string): boolean {
+	if (s.length > 3000) return true;
+	return /(\w{6,})\1{5,}/.test(s.slice(0, 2000)); // same chunk repeated back-to-back
+}
+
 function systemPrompt(userSystem: string, tools: Map<string, Tool>): string {
 	return [
 		userSystem.trim(),
@@ -76,9 +83,25 @@ export async function runAgent(opts: {
 	];
 	const iterations: AgentResult['iterations'] = [];
 	let extracted: unknown; // last extract_fields result — the real structured data
+	let degenRetries = 0;   // small local models occasionally degenerate; retry once before flagging
 
 	for (let i = 0; i < maxIters; i++) {
 		const raw = stripThink(await chat(messages));
+
+		// Runaway repetition (degenerate generation). A clean re-prompt usually clears a transient
+		// glitch; only flag for review if it degenerates again (so a valid doc isn't falsely flagged).
+		if (looksDegenerate(raw)) {
+			if (degenRetries < 1) {
+				degenRetries++;
+				iterations.push({ iter: i, raw: raw.slice(0, 200) + '… [degenerate output — retrying]' });
+				messages.push({ role: 'user', content: `Your last reply was malformed/repetitive. Reply again with ONLY a compact, valid JSON object.${suffix}` });
+				continue;
+			}
+			const fd = { decision: 'flagged', reason: 'agent response repeatedly malformed (model degeneration) — needs human review', confidence: 0 };
+			iterations.push({ iter: i, raw: raw.slice(0, 300) + '… [truncated degenerate output]' });
+			return { final: JSON.stringify(fd), finalData: fd, decision: 'flagged', reason: fd.reason, confidence: 0, extracted, iterations, incomplete: false };
+		}
+
 		const parsed = extractJson(raw);
 		messages.push({ role: 'assistant', content: raw });
 
