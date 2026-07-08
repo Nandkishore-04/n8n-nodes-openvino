@@ -1,8 +1,6 @@
 <div align="center">
 
-[![Built with OpenVINO](https://img.shields.io/badge/Built%20with-OpenVINO™-5FB8F6?style=for-the-badge&logo=intel&logoColor=white)](https://docs.openvino.ai)
-&nbsp;
-[![Google Summer of Code 2026](https://img.shields.io/badge/GSoC-2026-F9AB00?style=for-the-badge&logo=google&logoColor=white)](https://summerofcode.withgoogle.com)
+<img src="assets/openvino-logo.svg" alt="OpenVINO" height="52"/> &nbsp;&nbsp;&nbsp;&nbsp; <img src="assets/gsoc-logo.svg" alt="Google Summer of Code" height="30"/>
 
 # n8n-nodes-openvino
 
