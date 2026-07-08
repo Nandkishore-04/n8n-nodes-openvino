@@ -1,0 +1,8 @@
+# Python deps for the native OpenVINO gateway (scripts/native_gateway.py) inside a container.
+# openvino-genai brings the VLM/LLM pipelines; optimum[openvino] runs BGE embeddings.
+openvino-genai>=2025.0
+optimum[openvino]>=1.20
+transformers>=4.45
+opencv-python-headless>=4.10
+pymupdf>=1.24
+numpy>=1.26

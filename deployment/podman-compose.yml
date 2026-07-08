@@ -1,137 +1,58 @@
-# n8n + OpenVINO Model Server stack
+# n8n + OpenVINO native-gateway stack (Linux / Intel GPU).
+#
+# The NATIVE gateway run (python scripts/native_gateway.py) is the TESTED path and works on both
+# Windows and Linux. This container stack is provided for Linux users who prefer containers on an
+# Intel host with GPU drivers. Windows users run the gateway natively (WSL can't pass the chips in).
+#
 # Usage:
 #   cd deployment
-#   cp .env.example .env          # edit RENDER_GROUP_ID if needed
+#   cp .env.example .env    # set POSTGRES_PASSWORD, N8N_ENCRYPTION_KEY, RENDER_GROUP_ID, DOC_ROOT
+#   # place your OpenVINO model dirs under deployment/models/  (VLM, LLM, BGE, clip — see README)
 #   podman-compose up -d
-#   podman-compose logs -f ovms-llm   # wait for "AVAILABLE"
+#   podman-compose logs -f gateway   # wait for "Ready -> http://0.0.0.0:8000"
 #   n8n: http://localhost:5678
+#
+# In the imported workflow's Config node, set (container values):
+#   docRoot=/data  gatewayUrl=http://gateway:8000  qdrantUrl=http://qdrant:6333
 
 services:
 
-  # ── OVMS Classic ─────────────────────────────────────────────────────────────
-  # Serves CNN/transformer models via KServe v2 REST + gRPC
-  # W1: text-classifier (DistilBERT)
-  # W4+: ppocr-det, ppocr-rec, bsrgan, bge-small-en
-  ovms:
-    # Pinned by digest for reproducibility (= openvino/model_server:latest-gpu, OVMS 2026.1.0 as of 2026-06-04)
-    image: docker.io/openvino/model_server@sha256:22f92a1a5ad6784384e47296c43bde239887a623e75de45b0e1802659de416a6
-    container_name: ovms
+  # ── OpenVINO gateway ──────────────────────────────────────────────────────────
+  # scripts/native_gateway.py: VLM OCR + Qwen3 LLM (GPU), CLIP document triage, BGE embeddings.
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployment/gateway.Dockerfile
+    container_name: openvino-gateway
     restart: unless-stopped
     ports:
-      - "9000:9000"   # gRPC
-      - "9001:9001"   # REST
+      - "8000:8000"
+    # Intel GPU passthrough. For NPU triage: also add "- /dev/accel/accel0" here and set CLIP_DEVICE=NPU
+    # in .env (needs the intel_vpu driver on the host — best-effort, untested in-container).
     devices:
       - /dev/dri
     group_add:
       - "${RENDER_GROUP_ID:-992}"
     volumes:
       - ./models:/models:ro
-      - ./config.json:/config.json:ro
     command: >
-      --config_path /config.json
-      --port 9000
-      --rest_port 9001
-      --log_level INFO
+      --models /models --host 0.0.0.0 --port 8000 --ocr-engine vlm
+      --vlm-model /models/${VLM_MODEL:-qwen2.5-vl-7b}
+      --llm /models/${LLM_MODEL:-qwen3-8b-ov}
+      --clip-model /models/clip
+      --ocr-device ${OCR_DEVICE:-GPU}
+      --llm-device ${LLM_DEVICE:-GPU}
+      --clip-device ${CLIP_DEVICE:-GPU}
+    mem_limit: 12g
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:9001/v1/config || exit 1"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-
-  # ── OVMS LLM ─────────────────────────────────────────────────────────────────
-  # Serves Qwen3-4B INT4 via OpenAI-compatible /v3/chat/completions
-  # Auto-downloads from HuggingFace on first run (~3GB)
-  ovms-llm:
-    # Same image as ovms — pinned by digest (openvino/model_server:latest-gpu, OVMS 2026.1.0)
-    image: docker.io/openvino/model_server@sha256:22f92a1a5ad6784384e47296c43bde239887a623e75de45b0e1802659de416a6
-    container_name: ovms-llm
-    restart: unless-stopped
-    user: "0"
-    ports:
-      - "8080:8000"
-    devices:
-      - /dev/dri
-    group_add:
-      - "${RENDER_GROUP_ID:-992}"
-    volumes:
-      - ovms_llm_models:/models:rw
-    command: >
-      --source_model OpenVINO/Qwen3-4B-int4-ov
-      --model_repository_path /models
-      --task text_generation
-      --rest_port 8000
-      --cache_size 2
-    # NOTE: --tool_parser qwen3 removed — unsupported by this OVMS build and it breaks ALL
-    # chat requests. Tool calling (W6 agent) needs a supported parser or newer OVMS; revisit then.
-    mem_limit: 6g
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v3/models || exit 1"]
-      interval: 30s
-      timeout: 15s
+      timeout: 5s
       retries: 10
       start_period: 180s
 
-  # ── OVMS Embeddings ──────────────────────────────────────────────────────────
-  # Serves BGE-small-en via OpenAI-compatible /v3/embeddings (for RAG).
-  # Auto-downloads from HuggingFace on first run.
-  ovms-embeddings:
-    image: docker.io/openvino/model_server@sha256:22f92a1a5ad6784384e47296c43bde239887a623e75de45b0e1802659de416a6
-    container_name: ovms-embeddings
-    restart: unless-stopped
-    user: "0"
-    ports:
-      - "8082:8000"
-    devices:
-      - /dev/dri
-    group_add:
-      - "${RENDER_GROUP_ID:-992}"
-    volumes:
-      - ovms_emb_models:/models:rw
-    command: >
-      --source_model OpenVINO/bge-base-en-v1.5-int8-ov
-      --model_repository_path /models
-      --task embeddings
-      --rest_port 8000
-    mem_limit: 3g
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v3/models || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 10
-      start_period: 120s
-
-  # ── Gateway ───────────────────────────────────────────────────────────────────
-  # Python preprocessor: tokenization, pre/post processing, /v1→/v3 proxy
-  gateway:
-    build:
-      context: ../gateway
-      dockerfile: Dockerfile
-    container_name: ovms-gateway
-    restart: unless-stopped
-    ports:
-      - "8000:8000"
-    environment:
-      - OVMS_URL=http://ovms:9001
-      - OVMS_LLM_URL=http://ovms-llm:8000
-      - OVMS_EMB_URL=http://ovms-embeddings:8000
-      - TOKENIZER_PATH=/models/tokenizer
-      - GATEWAY_PORT=8000
-    volumes:
-      - ./models/tokenizer-backup:/models/tokenizer:ro
-      - ./models/ppocr-v5-en-dict.txt:/models/ppocr-v5-en-dict.txt:ro
-    depends_on:
-      ovms:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
   # ── PostgreSQL ────────────────────────────────────────────────────────────────
   postgres:
-    # Pinned by digest (= postgres:15-alpine as of 2026-06-04)
     image: docker.io/postgres@sha256:df7bca0066e6f60cc3dd32faa70caddec20e2c22b58932f79498e5704b23854a
     container_name: n8n-postgres
     restart: unless-stopped
@@ -139,21 +60,20 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-n8n}
       POSTGRES_USER: ${POSTGRES_USER:-n8n}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    # Exposed to host so the local dashboard (web/) can read pipeline_documents.
-    # Local/demo only — on a shared deploy, read via an n8n endpoint instead.
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # apply the pipeline schema on first init
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U n8n"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-n8n}"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # ── Qdrant ────────────────────────────────────────────────────────────────────
   qdrant:
-    # Pinned by digest (= qdrant/qdrant:latest as of 2026-06-04)
     image: docker.io/qdrant/qdrant@sha256:45f8e3ddc2570a4d029877e1b5ec1045c19b3852b4e22a55c7f43b05aea0ca89
     container_name: qdrant
     restart: unless-stopped
@@ -164,7 +84,6 @@ services:
 
   # ── n8n ───────────────────────────────────────────────────────────────────────
   n8n:
-    # Pinned by digest (= n8nio/n8n:latest as of 2026-06-04)
     image: docker.io/n8nio/n8n@sha256:9f1f8e4c093c9924338bd168e3f813f746041d13b337753af0dbdd329e7b50f7
     container_name: n8n-openvino
     restart: unless-stopped
@@ -178,26 +97,21 @@ services:
       - DB_POSTGRESDB_USER=${POSTGRES_USER:-n8n}
       - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       - N8N_DIAGNOSTICS_ENABLED=false
-      # Owner-account login (n8n user management) is on by default — first visit creates the admin.
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
       - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
       - N8N_CUSTOM_EXTENSIONS=/custom-node
-      # Allow file nodes (Read/Write Files, Local File Trigger) to access the pipeline I/O dirs
-      - N8N_RESTRICT_FILE_ACCESS_TO=/data
-      # Allow the Code node to use Node's fs (move files) + crypto (sha256 dedup hash)
+      # Code node uses fs (move files) + crypto (sha256 dedup); file nodes limited to the data dir
       - NODE_FUNCTION_ALLOW_BUILTIN=fs,crypto
-      - OVMS_GATEWAY_URL=http://gateway:8000
-      - OVMS_LLM_URL=http://ovms-llm:8000
+      - N8N_RESTRICT_FILE_ACCESS_TO=/data
     volumes:
       - n8n_data:/home/node/.n8n
-      # Mount only what n8n needs to load the custom node — not the whole repo (tests, docs, .git, source).
+      # Only what n8n needs to load the custom node (built dist + its deps) — not the whole repo.
       - ../dist:/custom-node/dist:ro
       - ../package.json:/custom-node/package.json:ro
       - ../node_modules:/custom-node/node_modules:ro
-      - ./incoming:/data/incoming
-      - ./processed:/data/processed
-      # User's demo watch folder (host) → /data/proj-demo (container)
-      - /home/nandyy/Documents/proj-demo:/data/proj-demo
+      # Your document folder (host) -> /data (container). Create incoming/ processing/ processed/
+      # failed/ rejected/ inside it. In the workflow's Config node set docRoot=/data.
+      - ${DOC_ROOT:-./data}:/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -207,6 +121,4 @@ services:
 volumes:
   postgres_data:
   n8n_data:
-  ovms_llm_models:
-  ovms_emb_models:
   qdrant_data:
