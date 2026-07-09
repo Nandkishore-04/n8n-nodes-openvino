@@ -65,20 +65,31 @@ npm install && npm run build
 This compiles the two custom n8n nodes into `dist/`. *(Takes a minute or two.)*
 
 ### Step 2 — Download the AI models
-The gateway needs four models. Put each one's folder under `deployment/models/`:
+The gateway uses four models. Here's what each does:
 
-| Folder to create | Model | Job (chip) | Where to get it |
-|---|---|---|---|
-| `deployment/models/qwen2.5-vl-7b` | **Qwen2.5-VL-7B** (OpenVINO IR) | reads the document — OCR (GPU) | Hugging Face — search the OpenVINO build |
-| `deployment/models/qwen3-8b-ov` | **Qwen3-8B-int4-ov** | the reasoning agent (GPU) | [`OpenVINO/Qwen3-8B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-8B-int4-ov) |
-| *(auto-downloads)* | **bge-base-en-v1.5-int8-ov** | search embeddings (CPU) | [`OpenVINO/bge-base-en-v1.5-int8-ov`](https://huggingface.co/OpenVINO/bge-base-en-v1.5-int8-ov) — pulled automatically |
-| `deployment/models/clip` | **CLIP ViT-B/32** | the "is this a document?" glance (NPU) | **you build this** in the command below |
+| Model | Job (chip) | ~Size |
+|---|---|---|
+| **Qwen2.5-VL-7B** | reads the document — OCR (GPU) | ~6 GB |
+| **Qwen3-8B** | the reasoning agent (GPU) | ~5 GB |
+| **BGE** | search embeddings (CPU) | ~0.2 GB |
+| **CLIP ViT-B/32** | the "is this a document?" glance (NPU) | built locally |
 
-First install the Python libraries, then build the CLIP model:
+First install the Python libraries + the downloader:
 ```bash
-pip install openvino-genai "optimum[openvino]" opencv-python pymupdf numpy torch transformers
-python scripts/convert_clip.py            # creates deployment/models/clip/
+pip install openvino-genai "optimum[openvino]" opencv-python pymupdf numpy torch transformers "huggingface_hub[cli]"
 ```
+Then run these from the repo root — each drops the model into the folder the gateway expects:
+```bash
+# OCR model (GPU)
+huggingface-cli download OpenVINO/Qwen2.5-VL-7B-Instruct-int4-ov --local-dir deployment/models/qwen2.5-vl-7b
+
+# Agent LLM (GPU)
+huggingface-cli download OpenVINO/Qwen3-8B-int4-ov --local-dir deployment/models/qwen3-8b-ov
+
+# Triage model — built locally, not downloaded (creates deployment/models/clip/)
+python scripts/convert_clip.py
+```
+*(BGE embeddings download automatically on first run — no command needed. Total download ≈ 11 GB, so use a good connection.)*
 
 ### Step 3 — Create the document folders
 The pipeline moves files between five folders. Pick **one** parent folder (this is your **`docRoot`** — you'll need it again in Step 6):
