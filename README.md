@@ -36,102 +36,124 @@ Every model runs on **Intel silicon via OpenVINO** — the right chip for each j
 
 ---
 
-## Requirements
+## Prerequisites — install these first
 
-- **Intel AI PC** (Core Ultra / Lunar Lake / Meteor Lake) with GPU + NPU — or an Intel Linux box with GPU. *(macOS is CPU-only and not recommended; the value is the Intel GPU/NPU.)*
-- **Python 3.10+**, **Node.js 20+**
-- **Postgres** and **Qdrant** (local)
-- OpenVINO model files (see [Models](#1-models))
+You need **five** things on your machine before setup. Install them in this order:
 
-> **Why native, not containers?** On **Windows**, Docker/Podman run inside a WSL2 Linux VM that can't pass the Intel NPU/GPU through — so the gateway runs **natively**. The native path also works on **Linux**. (A best-effort Podman stack for Linux lives in `deployment/` — see [Containers](#containers-linux-experimental).)
+| # | What | Why | How to get it |
+|---|---|---|---|
+| 1 | **Intel hardware** | runs the AI models | An **Intel AI PC** (Core Ultra — Lunar Lake / Meteor Lake) with GPU + NPU. *No AI PC? An Intel box with just a GPU still works (triage falls back to GPU). macOS/AMD = CPU-only, slow — not recommended.* |
+| 2 | **Node.js 20+** | runs n8n + builds the nodes | [nodejs.org](https://nodejs.org) → download the LTS installer. Verify: `node -v` |
+| 3 | **Python 3.10+** | runs the gateway | [python.org](https://python.org) → install, **tick "Add to PATH"**. Verify: `python --version` |
+| 4 | **PostgreSQL** | stores document metadata | [postgresql.org/download](https://www.postgresql.org/download/) → install, **remember the password you set**. Verify: `psql --version` |
+| 5 | **Qdrant** | stores search vectors | Download the binary from [github.com/qdrant/qdrant/releases](https://github.com/qdrant/qdrant/releases) — run it so it listens on port `6333`. |
+
+> **Why run it "natively" (not in Docker)?** On **Windows**, Docker/Podman run inside a WSL2 Linux VM that **cannot reach the Intel NPU/GPU** — so the AI gateway runs directly on your OS. This native path works on **both Windows and Linux**. *(A container option for Linux-only users is in [Containers](#containers-linux-experimental).)*
 
 ---
 
 ## Setup
 
-### 0. Build the nodes
+Seven steps. Each command is copy-paste ready — **only the parts in `<angle brackets>` need replacing.**
+
+### Step 1 — Get the code and build the nodes
 ```bash
 git clone https://github.com/Nandkishore-04/n8n-nodes-openvino
 cd n8n-nodes-openvino
-npm install && npm run build      # compiles the custom nodes to dist/
+npm install && npm run build
 ```
+This compiles the two custom n8n nodes into `dist/`. *(Takes a minute or two.)*
 
-### 1. Models
-Place OpenVINO IR model directories where the gateway can find them (e.g. `deployment/models/`):
+### Step 2 — Download the AI models
+The gateway needs four models. Put each one's folder under `deployment/models/`:
 
-| Model | Purpose | How to get it |
-|---|---|---|
-| **Qwen2.5-VL-7B** (OpenVINO) | OCR (GPU) | download the OpenVINO build from Hugging Face |
-| **Qwen3-8B-int4-ov** | Agent LLM (GPU) | `OpenVINO/Qwen3-8B-int4-ov` on Hugging Face |
-| **bge-base-en-v1.5-int8-ov** | Embeddings (CPU) | `OpenVINO/bge-base-en-v1.5-int8-ov` (auto-loads via optimum) |
-| **CLIP** (ViT-B/32) | Triage (NPU) | convert it yourself → `python scripts/convert_clip.py` |
+| Folder to create | Model | Job (chip) | Where to get it |
+|---|---|---|---|
+| `deployment/models/qwen2.5-vl-7b` | **Qwen2.5-VL-7B** (OpenVINO IR) | reads the document — OCR (GPU) | Hugging Face — search the OpenVINO build |
+| `deployment/models/qwen3-8b-ov` | **Qwen3-8B-int4-ov** | the reasoning agent (GPU) | [`OpenVINO/Qwen3-8B-int4-ov`](https://huggingface.co/OpenVINO/Qwen3-8B-int4-ov) |
+| *(auto-downloads)* | **bge-base-en-v1.5-int8-ov** | search embeddings (CPU) | [`OpenVINO/bge-base-en-v1.5-int8-ov`](https://huggingface.co/OpenVINO/bge-base-en-v1.5-int8-ov) — pulled automatically |
+| `deployment/models/clip` | **CLIP ViT-B/32** | the "is this a document?" glance (NPU) | **you build this** in the command below |
 
+First install the Python libraries, then build the CLIP model:
 ```bash
 pip install openvino-genai "optimum[openvino]" opencv-python pymupdf numpy torch transformers
-python scripts/convert_clip.py     # writes deployment/models/clip/
+python scripts/convert_clip.py            # creates deployment/models/clip/
 ```
 
-### 2. Folders
-Create the pipeline I/O folders (this is your `docRoot`):
+### Step 3 — Create the document folders
+The pipeline moves files between five folders. Pick **one** parent folder (this is your **`docRoot`** — you'll need it again in Step 6):
 ```bash
-# Linux
-mkdir -p /data/proj-demo/{incoming,processing,processed,failed,rejected}
+# Linux / macOS
+mkdir -p ~/proj-demo/{incoming,processing,processed,failed,rejected}
+```
+```powershell
 # Windows (PowerShell)
-mkdir C:\Users\you\proj-demo\incoming, C:\Users\you\proj-demo\processing, C:\Users\you\proj-demo\processed, C:\Users\you\proj-demo\failed, C:\Users\you\proj-demo\rejected
+mkdir C:\Users\<you>\proj-demo\incoming, C:\Users\<you>\proj-demo\processing, C:\Users\<you>\proj-demo\processed, C:\Users\<you>\proj-demo\failed, C:\Users\<you>\proj-demo\rejected
 ```
 
-### 3. Postgres + Qdrant
+### Step 4 — Set up the databases
+**Postgres** — create the tables (replace `<user>` and `<db>` with what you set during install, usually `postgres`/`postgres`):
 ```bash
-# apply the pipeline schema once
 psql -h localhost -U <user> -d <db> -f deployment/sql/init.sql
-# Qdrant: run the qdrant binary (or container) so it listens on :6333
+```
+**Qdrant** — just start it; it listens on `6333` automatically:
+```bash
+./qdrant          # Linux/macOS
+.\qdrant.exe      # Windows
 ```
 
-### 4. Start the gateway (native — the tested path)
-This is the one process that talks to the chips. **Classify on NPU, OCR + LLM on GPU:**
+### Step 5 — Start the AI gateway
+This one process loads the models and talks to the chips. **Replace only the two `<...>` paths**, then run:
 ```bash
 python scripts/native_gateway.py \
   --models deployment/models \
   --ocr-engine vlm --vlm-model deployment/models/qwen2.5-vl-7b \
-  --llm <path-to>/qwen3-8b-ov \
+  --llm deployment/models/qwen3-8b-ov \
   --ocr-device GPU --llm-device GPU --clip-device NPU \
   --port 8000
 ```
-Wait for `Ready -> http://127.0.0.1:8000` and `CLIP document triage -> NPU`. By default it binds **127.0.0.1** (local only); add `--host 0.0.0.0 --api-key <secret>` only if you need remote access.
+✅ **You're good when you see:** `Ready -> http://127.0.0.1:8000` and `CLIP document triage -> NPU`.
 
-*(No GPU/NPU? Swap in `--ocr-device CPU --clip-device CPU` — slower, but it runs.)*
+- **No NPU?** change `--clip-device NPU` → `--clip-device GPU`.
+- **No GPU either?** use `--ocr-device CPU --llm-device CPU --clip-device CPU` (works, just slower).
+- **Remote access?** it's local-only by default — add `--host 0.0.0.0 --api-key <your-secret>` only if you truly need it.
 
-### 5. Start n8n with the custom nodes
-Set the env the pipeline needs, then launch n8n:
+> Leave this terminal running. Open a **new** terminal for the next step.
+
+### Step 6 — Start n8n
+Set three environment variables, then launch n8n **in the same terminal window** (they must be set in the session that runs `n8n`). Replace `<repo>` with the full path to this folder and `<docRoot>` with your folder from Step 3:
 ```bash
-# Linux
-export N8N_CUSTOM_EXTENSIONS="$PWD/dist"
+# Linux / macOS
+export N8N_CUSTOM_EXTENSIONS="<repo>/dist"
 export NODE_FUNCTION_ALLOW_BUILTIN="fs,crypto"
-export N8N_RESTRICT_FILE_ACCESS_TO="/data/proj-demo"
-n8n
+export N8N_RESTRICT_FILE_ACCESS_TO="<docRoot>"
+npx n8n
 ```
 ```powershell
-# Windows (PowerShell) — same session, then run n8n
-$env:N8N_CUSTOM_EXTENSIONS="C:\...\n8n-nodes-openvino\dist"
+# Windows (PowerShell)
+$env:N8N_CUSTOM_EXTENSIONS="<repo>\dist"
 $env:NODE_FUNCTION_ALLOW_BUILTIN="fs,crypto"
-$env:N8N_RESTRICT_FILE_ACCESS_TO="C:/Users/you/proj-demo"
-n8n
+$env:N8N_RESTRICT_FILE_ACCESS_TO="C:/Users/<you>/proj-demo"
+npx n8n
 ```
-n8n → http://localhost:5678
+Open **http://localhost:5678** in your browser.
 
-### 6. Import + configure the workflow
-1. **Import** `workflows/smart-document-pipeline.json`
-2. Open the **`Config`** node → set `docRoot` to your folder, and `gatewayUrl` / `qdrantUrl` if they differ
-3. Create two **credentials** (n8n prompts on import):
-   - **Postgres** — your DB host/user/password
-   - **OpenVINO Model Server** — Gateway URL `http://127.0.0.1:8000`
-4. **Activate** the workflow
+> ⚠️ On Windows these variables only apply to the **current** PowerShell window. If you close it, set them again before running `n8n`.
 
-### 7. Run it
-Drop a PDF/image into `incoming/`. Within seconds:
-- a **document** → OCR'd, extracted, validated → `processed/` + rows in Postgres + vectors in Qdrant
-- a **photo/selfie** → rejected on the NPU glance → `rejected/` (visible, recoverable)
-- a **duplicate** → skipped at the hash gate
+### Step 7 — Import and configure the workflow
+Inside n8n (http://localhost:5678):
+1. **Import** → select `workflows/smart-document-pipeline.json`
+2. Open the **`Config`** node → set **`docRoot`** to your folder from Step 3. *(Leave `gatewayUrl` / `qdrantUrl` as-is unless you changed the ports.)*
+3. Add the two **credentials** it asks for:
+   - **Postgres** → the host/user/password you set in Step 4
+   - **OpenVINO Model Server** → Gateway URL `http://127.0.0.1:8000`
+4. Click **Active** (top-right) to turn the workflow on.
+
+### ✅ Run it
+Drop a PDF or image into the **`incoming/`** folder. Within seconds:
+- a **real document** → read, extracted, validated → moves to `processed/` + rows appear in Postgres + vectors in Qdrant
+- a **photo/selfie** → caught on the NPU glance → moves to `rejected/` (visible, recoverable — never deleted)
+- a **duplicate** → skipped instantly at the hash check
 
 ---
 
