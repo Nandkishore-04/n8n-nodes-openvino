@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/openvino-logo.svg" alt="OpenVINO" height="52"/> &nbsp;&nbsp;&nbsp;&nbsp; <img src="assets/gsoc-logo.svg" alt="Google Summer of Code" height="30"/>
+<img src="assets/openvino-logo.svg" alt="OpenVINO" height="48"/> &nbsp;&nbsp;&nbsp;&nbsp; <img src="assets/gsoc-logo.svg" alt="Google Summer of Code" height="44"/>
 
 # n8n-nodes-openvino
 
