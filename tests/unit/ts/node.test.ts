@@ -58,7 +58,7 @@ describe('OpenVinoModelServer.execute — predict (REST)', () => {
 				transport: 'rest',
 				modelName: 'text-classifier',
 				inputData: '{"text":"hello"}',
-				targetDevice: 'AUTO:NPU,GPU,CPU',
+				targetDevice: 'AUTO',
 				performanceHint: 'THROUGHPUT',
 				timeout: 30,
 			},
@@ -71,7 +71,7 @@ describe('OpenVinoModelServer.execute — predict (REST)', () => {
 		const callArg = httpRequest.mock.calls[0][0];
 		expect(callArg.method).toBe('POST');
 		expect(callArg.url).toBe('http://gateway:8000/v1/models/text-classifier:predict');
-		expect(callArg.headers['X-Target-Device']).toBe('AUTO:NPU,GPU,CPU');
+		expect(callArg.headers['X-Target-Device']).toBe('AUTO');
 		expect(callArg.headers['X-Performance-Hint']).toBe('THROUGHPUT');
 		expect(callArg.timeout).toBe(30000);
 		expect(callArg.body).toEqual({ text: 'hello' });
@@ -221,13 +221,45 @@ describe('OpenVinoModelServer.execute — chatCompletion (LLM)', () => {
 	});
 });
 
-describe('OpenVinoModelServer.execute — stubs', () => {
-	it('returns a stub marker for embeddings', async () => {
-		const { ctx } = makeCtx(
-			{ operation: 'embeddings', targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60 },
-			null,
+describe('OpenVinoModelServer.execute — embeddings', () => {
+	it('POSTs to /v1/embeddings and returns the vector + dimensions', async () => {
+		const vec = Array.from({ length: 768 }, (_, k) => k / 1000);
+		const { ctx, httpRequest } = makeCtx(
+			{
+				operation: 'embeddings',
+				embeddingsModel: 'OpenVINO/bge-base-en-v1.5-int8-ov',
+				embeddingsText: 'what was the CGST?',
+				returnFull: false,
+				targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60,
+			},
+			{ object: 'list', data: [{ object: 'embedding', index: 0, embedding: vec }] },
 		);
 		const result = await node.execute.call(ctx);
-		expect(result[0][0].json._stub).toBe(true);
+
+		expect(httpRequest).toHaveBeenCalledWith(
+			expect.objectContaining({
+				method: 'POST',
+				url: 'http://gateway:8000/v1/embeddings',
+				body: { model: 'OpenVINO/bge-base-en-v1.5-int8-ov', input: 'what was the CGST?' },
+			}),
+		);
+		expect(result[0][0].json.embedding).toEqual(vec);
+		expect(result[0][0].json.dimensions).toBe(768);
+	});
+
+	it('returns the raw response when Return Full is on', async () => {
+		const raw = { object: 'list', data: [{ embedding: [0.1, 0.2] }] };
+		const { ctx } = makeCtx(
+			{
+				operation: 'embeddings',
+				embeddingsModel: 'bge',
+				embeddingsText: 'hello',
+				returnFull: true,
+				targetDevice: 'AUTO', performanceHint: 'LATENCY', timeout: 60,
+			},
+			raw,
+		);
+		const result = await node.execute.call(ctx);
+		expect(result[0][0].json).toEqual(raw);
 	});
 });

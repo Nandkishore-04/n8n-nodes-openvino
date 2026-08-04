@@ -1,0 +1,129 @@
+{
+  "name": "Query Records (SQL tool)",
+  "nodes": [
+    {
+      "parameters": { "httpMethod": "POST", "path": "query-records", "responseMode": "responseNode", "options": {} },
+      "id": "e2000000-0000-4000-8000-000000000001",
+      "name": "Query Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [ -820, 176 ],
+      "webhookId": "qr000000-0000-0000-0000-000000000001",
+      "notes": "POST {\"sql\":\"SELECT ...\"}. For standalone testing. Workflow must be Active for the /webhook/ URL."
+    },
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": { "values": [ { "name": "sql", "type": "string" } ] }
+      },
+      "id": "e2000000-0000-4000-8000-000000000002",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [ -820, 416 ],
+      "notes": "Makes this callable as a TOOL by the agent. Declares one input: sql (a read-only SELECT). Returns { rowCount, rows } to the caller."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "n-1", "name": "sql", "value": "={{ ($json.body && $json.body.sql) || $json.sql || '' }}", "type": "string" },
+            { "id": "n-2", "name": "viaWebhook", "value": "={{ !!($json.body && $json.body.sql) }}", "type": "boolean" }
+          ]
+        },
+        "includeOtherFields": false,
+        "options": {}
+      },
+      "id": "e2000000-0000-4000-8000-000000000003",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [ -620, 288 ],
+      "notes": "One clean 'sql' whichever trigger fired: webhook sends body.sql, the agent tool sends sql."
+    },
+    {
+      "parameters": {
+        "jsCode": "// GUARD (defense-in-depth on top of the read-only DB role): force a single read-only SELECT and\n// cap the result size. Anything that is not a lone SELECT/WITH becomes a harmless SELECT that just\n// returns an instruction row - so the agent gets a clear message back instead of an execution error.\nconst raw = ($json.sql != null ? $json.sql : '');\nlet sql = String(raw).trim().replace(/;+\\s*$/, '').trim();\n// Small models occasionally drop the underscore in identifiers (pipelinedocuments). Repair the known\n// table names so a correct-but-misspelled query still runs instead of erroring with 'relation does not exist'.\nsql = sql.replace(/\\bpipelinedocuments\\b/gi, 'pipeline_documents').replace(/\\bpipelineaudit\\b/gi, 'pipeline_audit');\nconst ok = /^(select|with)\\b/i.test(sql) && !sql.includes(';');\nif (!ok) {\n  sql = \"SELECT 'Only a single read-only SELECT statement is allowed. Rewrite your query as one SELECT.' AS error\";\n} else if (!/\\blimit\\s+\\d+/i.test(sql)) {\n  sql = sql + ' LIMIT 100';\n}\nreturn [{ json: { sql, viaWebhook: $json.viaWebhook } }];"
+      },
+      "id": "e2000000-0000-4000-8000-000000000004",
+      "name": "Guard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ -420, 288 ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "e2000000-0000-4000-8000-000000000005",
+      "name": "Run Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [ -200, 288 ],
+      "alwaysOutputData": true,
+      "credentials": { "postgres": { "id": "REPLACE_WITH_READONLY_CRED", "name": "OpenVINO Postgres (read-only)" } },
+      "notes": "Runs the guarded SELECT using the agent_readonly credential (SELECT-only). Never use the read-WRITE credential here."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Collect the returned rows into one compact object for the agent (or the webhook caller).\n// alwaysOutputData means an empty result still yields one item; drop empty items so rowCount is honest.\nconst rows = $input.all().map(i => i.json).filter(r => r && Object.keys(r).length);\nreturn [{ json: { rowCount: rows.length, rows, viaWebhook: $('Normalize').first().json.viaWebhook } }];"
+      },
+      "id": "e2000000-0000-4000-8000-000000000006",
+      "name": "Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 20, 288 ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            { "id": "wc-1", "leftValue": "={{ $('Normalize').first().json.viaWebhook }}", "rightValue": "true", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e2000000-0000-4000-8000-000000000007",
+      "name": "Webhook Call?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ 240, 288 ],
+      "notes": "Webhook run -> Respond; agent tool run -> just return the data to the caller."
+    },
+    {
+      "parameters": { "respondWith": "firstIncomingItem", "options": {} },
+      "id": "e2000000-0000-4000-8000-000000000008",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [ 460, 176 ]
+    },
+    {
+      "parameters": {},
+      "id": "e2000000-0000-4000-8000-000000000009",
+      "name": "Return to Caller",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [ 460, 416 ],
+      "notes": "Terminal node when called as a tool. Its { rowCount, rows } output is what the agent receives."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Query Webhook": { "main": [ [ { "node": "Normalize", "type": "main", "index": 0 } ] ] },
+    "When Executed by Another Workflow": { "main": [ [ { "node": "Normalize", "type": "main", "index": 0 } ] ] },
+    "Normalize": { "main": [ [ { "node": "Guard", "type": "main", "index": 0 } ] ] },
+    "Guard": { "main": [ [ { "node": "Run Query", "type": "main", "index": 0 } ] ] },
+    "Run Query": { "main": [ [ { "node": "Format", "type": "main", "index": 0 } ] ] },
+    "Format": { "main": [ [ { "node": "Webhook Call?", "type": "main", "index": 0 } ] ] },
+    "Webhook Call?": { "main": [ [ { "node": "Respond", "type": "main", "index": 0 } ], [ { "node": "Return to Caller", "type": "main", "index": 0 } ] ] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": {},
+  "tags": []
+}

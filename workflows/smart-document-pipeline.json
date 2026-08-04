@@ -204,7 +204,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Split the OCR text into ~1500-char chunks (under BGE's 512-token limit) for embedding.\nconst text = $('OCR (Document Inference)').first().json.text || '';\nconst size = 1500;\nconst out = [];\nfor (let i = 0; i < text.length; i += size) {\n  out.push({ json: {\n    chunk: text.slice(i, i + size),\n    chunk_index: out.length,\n    source_file: $('Claim File').first().json.fileName,\n    decision: $('OpenVINO Agent').first().json.decision,\n  }});\n}\nreturn out;"
+        "jsCode": "// RECURSIVE, boundary-aware chunking with overlap.\n//\n// SIZE=500 (not 1500): a big chunk holding a tax table + vendor address + payment terms collapses\n// into ONE averaged 768-dim vector - a blur of three unrelated ideas that matches everything\n// weakly and nothing strongly. Small chunks give each fact its own sharp vector, which is what\n// fact-lookup over invoices/receipts needs. (SIZE is a retrieval-quality choice; BGE's 512-token\n// limit is only a ceiling, not a target.) NOTE: small chunks mean each holds less context, so WF2\n// must retrieve MORE of them - keep topK ~8, not 5.\n//\n// BOUNDARIES: never cut mid-word or mid-sentence. We split at the most natural boundary available,\n// preferring paragraph -> line -> sentence -> word, and only hard-cut a single unbroken token that\n// is somehow longer than SIZE (OCR garbage). A line item is one atomic fact; slicing it destroys it.\n//\n// OVERLAP=100: consecutive chunks share ~100 chars, so a fact landing on a boundary still survives\n// intact in one chunk (e.g. 'CGST 2.5%' ending one chunk, its value '9.10' starting the next).\n// The overlap is snapped to a word boundary so it never begins with half a word.\nconst text = ($('OCR (Document Inference)').first().json.text || '').trim();\nconst SIZE = 500;\nconst OVERLAP = 100;\nconst SEPS = ['\\n\\n', '\\n', '. ', ' '];  // most-natural boundary first\n\n// Break the text into pieces that each fit in SIZE, descending to a finer separator only when a\n// piece is still too big. Separators are kept so the text still reads naturally.\nfunction explode(s, depth) {\n  if (s.length <= SIZE) return [s];\n  const sep = SEPS[depth];\n  if (sep === undefined) {                       // unbreakable token -> last-resort hard cut\n    const out = [];\n    for (let i = 0; i < s.length; i += SIZE) out.push(s.slice(i, i + SIZE));\n    return out;\n  }\n  const out = [];\n  for (const part of s.split(sep)) {\n    if (!part) continue;\n    const piece = part + sep;\n    if (piece.length > SIZE) out.push(...explode(piece, depth + 1));\n    else out.push(piece);\n  }\n  return out;\n}\n\n// Take the trailing ~n chars for the overlap, but start at a word boundary so the carried-over\n// text never begins with a fragment like 'GST 2.5%' sliced out of 'CGST 2.5%'.\nfunction tail(s, n) {\n  if (s.length <= n) return s;\n  const t = s.slice(-n);\n  const sp = t.search(/\\s/);\n  return sp === -1 ? t : t.slice(sp + 1);\n}\n\n// Greedily pack pieces into chunks up to SIZE, carrying the overlap into the next chunk.\nconst chunks = [];\nlet buf = '';\nfor (const piece of explode(text, 0)) {\n  if (buf && buf.length + piece.length > SIZE) {\n    chunks.push(buf);\n    buf = tail(buf, OVERLAP) + piece;\n  } else {\n    buf += piece;\n  }\n}\nif (buf.trim()) chunks.push(buf);\n\nreturn chunks.map((chunk, i) => ({ json: {\n  chunk: chunk.trim(),\n  chunk_index: i,\n  source_file: $('Claim File').first().json.fileName,\n  decision: $('OpenVINO Agent').first().json.decision,\n}}));"
       },
       "id": "6e9497a2-c7fa-4d2e-9644-bef2e7a8656d",
       "name": "Chunk Text",
@@ -214,18 +214,18 @@
     },
     {
       "parameters": {
-        "method": "POST",
-        "url": "={{ $('Config').first().json.gatewayUrl }}/v1/embeddings",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ model: 'OpenVINO/bge-base-en-v1.5-int8-ov', input: $json.chunk }) }}",
-        "options": { "batching": { "batch": { "batchSize": 1, "batchInterval": 200 } } }
+        "operation": "embeddings",
+        "embeddingsModel": "OpenVINO/bge-base-en-v1.5-int8-ov",
+        "embeddingsText": "={{ $json.chunk }}",
+        "returnFull": false
       },
       "id": "b19b532f-a040-41ef-8ee0-ae1a1daf67a6",
       "name": "Embed (BGE)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [ 1504, -32 ]
+      "type": "CUSTOM.openVinoModelServer",
+      "typeVersion": 1,
+      "position": [ 1504, -32 ],
+      "credentials": { "openVinoModelServerApi": { "id": "FgbuaiNS8y2Idy4b", "name": "OpenVINO Model Server account" } },
+      "notes": "Embed each chunk via the OpenVINO Model Server (Embeddings) CUSTOM node -> gateway /v1/embeddings. Processes one item per chunk. Returns { embedding, dimensions } per item; Store in Qdrant reads $json.embedding."
     },
     {
       "parameters": {
@@ -233,7 +233,7 @@
         "url": "={{ $('Config').first().json.qdrantUrl }}/collections/{{ $('Config').first().json.collection }}/points",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ points: [ { id: Date.now() + $('Chunk Text').item.json.chunk_index, vector: $json.data[0].embedding, payload: { text: $('Chunk Text').item.json.chunk, chunk_index: $('Chunk Text').item.json.chunk_index, source_file: $('Chunk Text').item.json.source_file, decision: $('Chunk Text').item.json.decision, pg_id: $('Insert Document').first().json.id } } ] }) }}",
+        "jsonBody": "={{ JSON.stringify({ points: [ { id: Date.now() + $('Chunk Text').item.json.chunk_index, vector: $json.embedding, payload: { text: $('Chunk Text').item.json.chunk, chunk_index: $('Chunk Text').item.json.chunk_index, source_file: $('Chunk Text').item.json.source_file, decision: $('Chunk Text').item.json.decision, pg_id: $('Insert Document').first().json.id } } ] }) }}",
         "options": {}
       },
       "id": "7e486367-c465-4972-ba9a-94ec374dc227",

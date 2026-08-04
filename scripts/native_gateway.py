@@ -60,6 +60,7 @@ CLIP_LABELS = None        # [L] label strings (for logging the best match)
 CLIP_LOGIT_SCALE = 100.0  # CLIP temperature (exp(logit_scale)) from the export
 CLIP_DEVICE = None        # the chip CLIP is compiled on (NPU by default)
 API_KEY = ""              # if set, every request must send Authorization: Bearer <API_KEY>
+DEBUG_PROMPT = False      # --debug-prompt: dump the exact prompt sent to the LLM (agent debugging)
 INFER_LOCK = threading.Lock()  # OV infer requests are not concurrency-safe; serialize all inference
 
 # ===========================================================================
@@ -461,11 +462,112 @@ def embed(texts):
 
 
 def flatten(messages):
+    """Render an OpenAI message list into one prompt string for Qwen3.
+
+    Also replays a tool round-trip: the assistant's own prior tool_calls are re-emitted in the same
+    <tool_call> syntax we asked the model to produce, and 'tool' results are fed back as plain text.
+    Without this the second turn of an agent loop would lose the tool call and its result.
+    """
     parts = []
     for m in messages:
-        r, c = m.get("role", "user"), m.get("content", "")
+        r = m.get("role", "user")
+        c = m.get("content") or ""
+        if isinstance(c, list):  # OpenAI content-parts form
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if r == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") or {}
+                parts.append('[Assistant]\n<tool_call>{"name": "%s", "arguments": %s}</tool_call>'
+                             % (fn.get("name"), fn.get("arguments", "{}")))
+            continue
+        if r == "tool":
+            parts.append(f"Tool result: {c}")
+            continue
         parts.append(f"[System]\n{c}" if r == "system" else (f"[Assistant]\n{c}" if r == "assistant" else c))
     return "\n".join(parts)
+
+
+def tool_defs_prompt(tools):
+    """Qwen3 has no native tool API, so we teach it to emit tool calls as text and parse them back."""
+    defs = json.dumps([(t.get("function") or {"name": t.get("name"),
+                        "description": t.get("description"), "parameters": t.get("parameters")}) for t in tools])
+    return ("You can call these tools (JSON):\n" + defs +
+            "\n\nIf the user's request needs a tool, your ENTIRE reply must be exactly:\n"
+            '<tool_call>{"name": "<tool_name>", "arguments": {<args>}}</tool_call>\n'
+            "Emit the tool call immediately. Do NOT explain, do NOT greet, do NOT restate these "
+            "instructions, and do NOT ask the user to repeat or confirm their request. "
+            "After the tool result comes back, answer the user in plain text.")
+
+
+def build_prompt(messages, tools):
+    """Assemble the prompt for a TOOL-CALLING turn.
+
+    The tool definitions must sit in the SYSTEM block, BEFORE the user's message, and the prompt must
+    end on an [Assistant] cue. Appending them after the conversation (the old behaviour) made the
+    instructions the last thing the model saw, so it dutifully replied 'I understand the instructions,
+    please provide a document or a query' instead of acting on the request that was buried above.
+    """
+    sys_parts, convo = [], []
+    for m in messages:
+        r = m.get("role", "user")
+        c = m.get("content") or ""
+        if isinstance(c, list):
+            c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+        if r == "system":
+            sys_parts.append(str(c))
+        elif r == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") or {}
+                convo.append('[Assistant]\n<tool_call>{"name": "%s", "arguments": %s}</tool_call>'
+                             % (fn.get("name"), fn.get("arguments", "{}")))
+        elif r == "tool":
+            convo.append(f"[Tool result]\n{c}")
+        elif r == "assistant":
+            convo.append(f"[Assistant]\n{c}")
+        else:
+            convo.append(f"[User]\n{c}")
+
+    if tools:
+        sys_parts.append(tool_defs_prompt(tools))
+
+    out = []
+    if sys_parts:
+        out.append("[System]\n" + "\n\n".join(sys_parts) + "\n/no_think")
+    out.extend(convo)
+    out.append("[Assistant]\n")  # cue the model to take its turn NOW, rather than echo the prompt
+    return "\n\n".join(out)
+
+
+def parse_tool_call(text):
+    """Pull a <tool_call>{...}</tool_call> out of the reply. Salvages botched JSON (the model
+    sometimes closes with )) instead of }}) by recovering the name and arguments by regex."""
+    tc = re.search(r"<tool_call>([\s\S]*?)</tool_call>", text)
+    if not tc:
+        return None
+    raw = tc.group(1)
+    try:
+        call = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
+    except Exception:
+        nm = re.search(r'"name"\s*:\s*"([^"]+)"', raw)
+        if not nm:
+            return None
+        args = {}
+        ag = re.search(r'"arguments"\s*:\s*(\{[\s\S]*\})', raw)
+        if ag:
+            try:
+                args = json.loads(ag.group(1))
+            except Exception:
+                args = {}
+        call = {"name": nm.group(1), "arguments": args}
+    return call if call.get("name") else None
+
+
+def strip_think(text):
+    """Drop Qwen3's <think> reasoning block (it emits one even under /no_think)."""
+    close = text.rfind("</think>")
+    if close != -1:
+        text = text[close + len("</think>"):]
+    return re.sub(r"</?think>", "", text).strip()
 
 
 def messages_from_responses(data):
@@ -573,57 +675,63 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, {"object": "list", "data": [
                     {"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vecs)]})
             elif "chat/completions" in self.path:
-                prompt = flatten(req.get("messages", [])) + " /no_think"
+                # Tool calling is supported HERE too, not only on /responses: a standard OpenAI client
+                # (n8n's AI Agent, LangChain, ...) sends its tools on this endpoint, and silently
+                # dropping them meant the model never learned the tools existed and just chatted.
+                tools = req.get("tools") or []
+                msgs = req.get("messages", [])
+                # Tool turns need the structured prompt (tools in the system block + [Assistant] cue).
+                # No tools -> keep the original flat format, which the custom OpenVINO Agent node relies on.
+                prompt = build_prompt(msgs, tools) if tools else flatten(msgs) + " /no_think"
                 mnt = int(req.get("max_tokens", 512))
                 with INFER_LOCK:
                     try:  # repetition_penalty curbs runaway repetition loops; not all builds accept the kwarg
                         text = str(LLM.generate(prompt, max_new_tokens=mnt, repetition_penalty=1.3))
                     except Exception:
                         text = str(LLM.generate(prompt, max_new_tokens=mnt))
-                print(f"  [LLM] {len(text)} chars in {(time.time()-t0):.1f}s")
+                text = strip_think(text)
+                # Only look for a tool call when the caller actually offered tools - clients that pass
+                # none (e.g. the custom OpenVINO Agent node, which runs its own ReAct loop) keep the
+                # plain-text contract they expect.
+                call = parse_tool_call(text) if tools else None
+                if call:
+                    cid = f"call_{int(time.time() * 1000)}"
+                    message = {"role": "assistant", "content": None,
+                               "tool_calls": [{"id": cid, "type": "function",
+                                               "function": {"name": call["name"],
+                                                            "arguments": json.dumps(call.get("arguments", {}))}}]}
+                    finish = "tool_calls"
+                    print(f"  [LLM] -> tool_call {call['name']}")
+                else:
+                    message = {"role": "assistant", "content": text}
+                    finish = "stop"
+                    print(f"  [LLM] {len(text)} chars in {(time.time()-t0):.1f}s")
                 self._json(200, {"id": "chatcmpl-native", "object": "chat.completion",
+                                 "created": int(time.time()),
                                  "model": req.get("model", "qwen3-ov"),
-                                 "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]})
+                                 "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+                                 "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}})
             elif "responses" in self.path:
                 msgs = messages_from_responses(req)
                 tools = req.get("tools") or []
-                prompt = flatten(msgs)
-                if tools:  # prompt-based function calling: tell Qwen3 how to emit a tool call
-                    defs = json.dumps([(t.get("function") or {"name": t.get("name"),
-                                        "description": t.get("description"), "parameters": t.get("parameters")}) for t in tools])
-                    prompt += ("\n\nAVAILABLE TOOLS (JSON): " + defs +
-                               '\nTo call a tool, reply with ONLY: <tool_call>{"name": "<tool_name>", "arguments": {<args>}}</tool_call>'
-                               " and nothing else. Once you have the tool result and can answer, reply in plain text.")
-                prompt += " /no_think"
+                print(f"  [LLM /responses] client sent {len(tools)} tool(s): "
+                      f"{[ (t.get('function') or t).get('name') for t in tools ]}")
+                prompt = build_prompt(msgs, tools) if tools else flatten(msgs) + " /no_think"
+                if DEBUG_PROMPT:
+                    print("  [RAW INPUT] " + json.dumps(req.get("input"))[:800])
+                    print("  [PROMPT >>>]\n" + prompt + "\n  [<<< PROMPT]")
                 mnt = int(req.get("max_output_tokens", req.get("max_tokens", 512)))
                 with INFER_LOCK:
                     try:
                         text = str(LLM.generate(prompt, max_new_tokens=mnt, repetition_penalty=1.3))
                     except Exception:
                         text = str(LLM.generate(prompt, max_new_tokens=mnt))
-                text = re.sub(r"^\s*<think>[\s\S]*?</think>\s*", "", text).strip()
+                text = strip_think(text)
                 base = {"id": f"resp_{int(time.time()*1000)}", "object": "response", "created_at": int(time.time()),
                         "model": req.get("model", LLM_NAME), "status": "completed",
                         "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}
-                tc = re.search(r"<tool_call>([\s\S]*?)</tool_call>", text)
-                call = None
-                if tc:
-                    raw_call = tc.group(1)
-                    try:
-                        call = json.loads(raw_call[raw_call.index("{"):raw_call.rindex("}") + 1])
-                    except Exception:
-                        # model botched the JSON (e.g. )) instead of }}) — salvage the tool name, default args
-                        nm = re.search(r'"name"\s*:\s*"([^"]+)"', raw_call)
-                        if nm:
-                            ag = re.search(r'"arguments"\s*:\s*(\{[\s\S]*\})', raw_call)
-                            args = {}
-                            if ag:
-                                try:
-                                    args = json.loads(ag.group(1))
-                                except Exception:
-                                    args = {}
-                            call = {"name": nm.group(1), "arguments": args}
-                if call and call.get("name"):
+                call = parse_tool_call(text) if tools else None
+                if call:
                     cid = f"call_{int(time.time() * 1000)}"
                     base["output"] = [{"type": "function_call", "id": f"fc_{cid}", "call_id": cid,
                                        "name": call["name"], "arguments": json.dumps(call.get("arguments", {})),
@@ -648,7 +756,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     global DET, REC, CTC_CHARS, LLM, EMBED, OCR_DEVICE, DET_STATIC, OCR_ENGINE, HTD, RTR, SR, SR_MAX_SIDE, VLM
     global VLM_MODEL_DIR, MODELS_DIR, DET_DIR, REC_DIR, CURRENT_OCR_DEVICE, LLM_NAME
-    global CLIP, CLIP_TEXT_EMB, CLIP_IS_DOC, CLIP_LABELS, CLIP_LOGIT_SCALE, CLIP_DEVICE, API_KEY
+    global CLIP, CLIP_TEXT_EMB, CLIP_IS_DOC, CLIP_LABELS, CLIP_LOGIT_SCALE, CLIP_DEVICE, API_KEY, DEBUG_PROMPT
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", required=True, help="dir with ppocr-det/rec + dict (or htd/rtr for omz)")
     ap.add_argument("--llm", default="qwen3-8b-ov", help="openvino-genai model dir")
@@ -666,6 +774,8 @@ def main():
     ap.add_argument("--clip-model", default="", help="CLIP triage IR dir (default <models>/clip); run scripts/convert_clip.py")
     ap.add_argument("--clip-device", default="NPU", help="chip for the CLIP document-triage classifier (NPU recommended)")
     ap.add_argument("--host", default="127.0.0.1", help="bind address: 127.0.0.1 = local only (secure default); 0.0.0.0 = all interfaces")
+    ap.add_argument("--debug-prompt", action="store_true",
+                    help="print the exact prompt sent to the LLM on tool-calling requests (agent debugging)")
     ap.add_argument("--api-key", default=os.environ.get("GATEWAY_API_KEY", ""),
                     help="require 'Authorization: Bearer <key>' on every request (set this when binding to 0.0.0.0)")
     ap.add_argument("--port", type=int, default=8000)
@@ -753,6 +863,9 @@ def main():
         print(f"  Embeddings disabled ({e}) -- OCR + LLM still work. Install optimum[openvino] to enable.")
 
     API_KEY = a.api_key
+    DEBUG_PROMPT = a.debug_prompt
+    if DEBUG_PROMPT:
+        print("  debug: dumping the exact prompt sent to the LLM on every tool-calling request")
     if a.host == "0.0.0.0" and not API_KEY:
         print("  WARNING: binding to 0.0.0.0 with NO --api-key — the inference API is open to the whole network.")
     print(f"  auth: {'Bearer token required' if API_KEY else 'none (local-only bind)'}")

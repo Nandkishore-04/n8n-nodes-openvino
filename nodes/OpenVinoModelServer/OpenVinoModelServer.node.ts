@@ -89,7 +89,7 @@ export class OpenVinoModelServer implements INodeType {
 					{ name: 'Chat Completion',    value: 'chatCompletion',    description: 'Single LLM call via Qwen3-4B',          action: 'Generate a chat completion' },
 					{ name: 'Classify Document',  value: 'classifyDocument',  description: 'CLIP zero-shot triage on NPU → is this a processable document? (+confidence)', action: 'Classify a document image' },
 					{ name: 'Document Inference', value: 'documentInference', description: 'PDF/image → OCR text + bounding boxes', action: 'Extract text from a document' },
-					{ name: 'Embeddings',         value: 'embeddings',        description: 'Text → BGE-small-en vector',           action: 'Generate a text embedding' },
+					{ name: 'Embeddings',         value: 'embeddings',        description: 'Text → BGE 768-dim vector (for Qdrant)', action: 'Generate a text embedding' },
 					{ name: 'Get Model Status',   value: 'modelStatus',       description: 'Per-model readiness check',            action: 'Get model status' },
 					{ name: 'List Models',        value: 'listModels',        description: 'List all models served by OVMS',       action: 'List models' },
 					{ name: 'Predict',            value: 'predict',           description: 'Run inference on a classic model',     action: 'Run inference on a classic model' },
@@ -221,8 +221,27 @@ export class OpenVinoModelServer implements INodeType {
 				name: 'returnFull',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to return the raw OpenAI-style response. Off returns just the assistant message text.',
-				displayOptions: { show: { operation: ['chatCompletion'] } },
+				description: 'Whether to return the raw API response. Off returns just the essential result — the assistant message text (chat) or the embedding vector.',
+				displayOptions: { show: { operation: ['chatCompletion', 'embeddings'] } },
+			},
+
+			// ── Embeddings params ─────────────────────────────────────────────────
+			{
+				displayName: 'Embedding Model',
+				name: 'embeddingsModel',
+				type: 'string',
+				default: 'OpenVINO/bge-base-en-v1.5-int8-ov',
+				description: 'BGE model label sent to the gateway. The gateway always uses its loaded --bge model regardless, so this is for clarity; keep it matching what stored the vectors.',
+				displayOptions: { show: { operation: ['embeddings'] } },
+			},
+			{
+				displayName: 'Text',
+				name: 'embeddingsText',
+				type: 'string',
+				typeOptions: { rows: 3 },
+				default: '',
+				description: 'Text to convert into a 768-dim BGE vector (e.g. a document chunk to store, or a query to search)',
+				displayOptions: { show: { operation: ['embeddings'] } },
 			},
 
 			// ── AUTO plugin ───────────────────────────────────────────────────────
@@ -438,10 +457,32 @@ export class OpenVinoModelServer implements INodeType {
 						result = { content, usage: resp?.usage, model: resp?.model };
 					}
 
-				// ── stubs ──────────────────────────────────────────────────────────
+				// ── embeddings (BGE via gateway → Qdrant) ───────────────────────────
+				} else if (operation === 'embeddings') {
+					const embeddingsModel = this.getNodeParameter('embeddingsModel', i) as string;
+					const text = this.getNodeParameter('embeddingsText', i) as string;
+					const returnFull = this.getNodeParameter('returnFull', i) as boolean;
+
+					this.logger.info(`[openvino:embeddings] ${embeddingsModel} → ${credentials.gatewayUrl}/v1/embeddings`);
+					const resp = await this.helpers.httpRequest({
+						method: 'POST',
+						url: `${credentials.gatewayUrl}/v1/embeddings`,
+						headers: restHeaders,
+						body: { model: embeddingsModel, input: text },
+						json: true,
+						timeout: timeoutSec * 1000,
+					}) as any;
+
+					if (returnFull) {
+						result = resp;
+					} else {
+						const embedding = resp?.data?.[0]?.embedding ?? [];
+						result = { embedding, dimensions: Array.isArray(embedding) ? embedding.length : 0, model: embeddingsModel };
+					}
+
+				// ── unknown operation ───────────────────────────────────────────────
 				} else {
-					this.logger.info(`[openvino:${operation}] stub — embeddings lands W5`);
-					result = { _stub: true, operation, note: 'embeddings lands W5' };
+					throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
 				}
 
 				// carry the input binary through so a later node (e.g. OCR after Classify) still has the file

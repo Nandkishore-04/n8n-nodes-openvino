@@ -1,0 +1,221 @@
+{
+  "name": "RAG Q&A (WF2)",
+  "nodes": [
+    {
+      "parameters": { "httpMethod": "POST", "path": "rag-query", "responseMode": "responseNode", "options": {} },
+      "id": "d1000000-0000-4000-8000-000000000001",
+      "name": "RAG Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [ -800, 176 ],
+      "webhookId": "rag00000-0000-0000-0000-000000000001",
+      "notes": "POST {\"query\":\"your question\"}. Workflow must be Active for the /webhook/rag-query URL to serve. Returns {answer, sources}."
+    },
+    {
+      "parameters": {
+        "inputSource": "workflowInputs",
+        "workflowInputs": { "values": [ { "name": "query", "type": "string" } ] }
+      },
+      "id": "d1000000-0000-4000-8000-00000000000b",
+      "name": "When Executed by Another Workflow",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [ -800, 416 ],
+      "notes": "Makes this workflow callable as a TOOL by the agentic workflow. Declares one input: query (string). Returns {answer, sources} to the caller."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "cfg-1", "name": "gatewayUrl", "value": "http://127.0.0.1:8000", "type": "string" },
+            { "id": "cfg-2", "name": "qdrantUrl", "value": "http://127.0.0.1:6333", "type": "string" },
+            { "id": "cfg-3", "name": "collection", "value": "documents", "type": "string" },
+            { "id": "cfg-4", "name": "topK", "value": 8, "type": "number" },
+            { "id": "cfg-5", "name": "minScore", "value": 0.5, "type": "number" },
+            { "id": "cfg-6", "name": "keywordLimit", "value": 10, "type": "number" },
+            { "id": "cfg-7", "name": "query", "value": "={{ String(($json.body && $json.body.query) || $json.query || '').trim() }}", "type": "string" },
+            { "id": "cfg-8", "name": "viaWebhook", "value": "={{ !!($json.body && $json.body.query) }}", "type": "boolean" }
+          ]
+        },
+        "includeOtherFields": true,
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000002",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [ -600, 288 ],
+      "notes": "EDIT gatewayUrl/qdrantUrl/collection/topK. 'query' is auto-normalized: webhook sends body.query, the agent tool sends query - both land in $('Config').first().json.query."
+    },
+    {
+      "parameters": {
+        "operation": "embeddings",
+        "embeddingsModel": "OpenVINO/bge-base-en-v1.5-int8-ov",
+        "embeddingsText": "={{ $('Config').first().json.query }}",
+        "returnFull": false
+      },
+      "id": "d1000000-0000-4000-8000-000000000003",
+      "name": "Embed Query",
+      "type": "CUSTOM.openVinoModelServer",
+      "typeVersion": 1,
+      "position": [ -380, 288 ],
+      "credentials": { "openVinoModelServerApi": { "id": "FgbuaiNS8y2Idy4b", "name": "OpenVINO Model Server account" } },
+      "notes": "Embed the user's question via the OpenVINO Model Server (Embeddings) CUSTOM node -> gateway /v1/embeddings. Same BGE model WF1 used to store chunks (768-dim, Cosine). Returns { embedding, dimensions }."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.qdrantUrl }}/collections/{{ $('Config').first().json.collection }}/points/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vector: $json.embedding, limit: $('Config').first().json.topK, with_payload: true }) }}",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000004",
+      "name": "Qdrant Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -160, 288 ],
+      "notes": "Semantic search over the vectors WF1 stored. Returns result[] with payload {text, source_file, pg_id, ...}. The 'documents' collection must already exist (768/Cosine) - WF1 upserts but never creates it."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.qdrantUrl }}/collections/{{ $('Config').first().json.collection }}/points/scroll",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => { const cfg = $('Config').first().json; const q = String(cfg.query || ''); const STOP = new Set(['the','and','for','was','were','are','what','which','who','how','many','much','its','this','that','there','their','have','has','had','from','with','about','any','all','get','tell','show','give','does','did','can','could','would','should','you','your','our','not','but','into','over','under','than','then','when','where','why','been','being','they','them']); const terms = [...new Set((q.toLowerCase().match(/[a-z0-9][a-z0-9._\\/-]{2,}/g) || []))].filter(t => !STOP.has(t)).slice(0, 8); const should = terms.length ? terms.map(t => ({ key: 'text', match: { text: t } })) : [{ key: 'text', match: { text: '__no_terms__' } }]; return JSON.stringify({ filter: { should }, limit: Number(cfg.keywordLimit || 10), with_payload: true }); })() }}",
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-00000000000e",
+      "name": "Keyword Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [ -160, 448 ],
+      "onError": "continueRegularOutput",
+      "notes": "KEYWORD arm of hybrid search. BGE embeds an exact ID like 'INV-2024-0891' or a GSTIN almost meaninglessly, so semantic search alone cannot find them - only a literal token match can. Uses Qdrant's full-text payload index on 'text' (create it ONCE: PUT /collections/documents/index {field_name:'text', field_schema:{type:'text', tokenizer:'word', lowercase:true, min_token_len:2}}). onError=continue: if the index is missing this arm returns nothing and the workflow degrades to dense-only rather than failing."
+    },
+    {
+      "parameters": {
+        "jsCode": "// HYBRID retrieval: fuse a semantic arm and a keyword arm, then ground the LLM on the result.\n//\n// Why two arms: dense/semantic search is great at meaning but bad at exact tokens - BGE turns\n// 'INV-2024-0891' into a nearly meaningless vector, so no amount of cosine will find it. Keyword\n// search is the opposite: literal on IDs, blind to paraphrase. Neither alone is enough for a\n// document pipeline where users ask both 'what were the taxes?' and 'show me invoice INV-2024-0891'.\n//\n// Fusion is Reciprocal Rank Fusion (RRF): score = sum over arms of 1/(k + rank). It is RANK-based,\n// so it needs no score calibration between two arms whose numbers are not comparable (cosine vs\n// term-count). A chunk ranked high in EITHER arm surfaces; one ranked high in BOTH wins.\nconst cfg = $('Config').first().json;\nconst query = String(cfg.query || '');\nconst minScore = cfg.minScore != null ? Number(cfg.minScore) : 0.45;\nconst topK = cfg.topK != null ? Number(cfg.topK) : 8;\nconst RRF_K = 60;  // standard damping constant; keeps any single arm from dominating\n\n// --- ARM A: dense. Qdrant returns these ranked by cosine; cut the weak tail (it always returns\n// topK however irrelevant, so without this an unrelated doc gets cited as a source).\nconst denseAll = ((($('Qdrant Search').first().json) || {}).result || []).filter(h => h && h.payload && h.payload.text);\nconst dense = denseAll.filter(h => Number(h.score) >= minScore);\n\n// --- ARM B: keyword. Rank by how many distinct query terms the chunk literally contains.\nconst STOP = new Set(['the','and','for','was','were','are','what','which','who','how','many','much','its','this','that','there','their','have','has','had','from','with','about','any','all','get','tell','show','give','does','did','can','could','would','should','you','your','our','not','but','into','over','under','than','then','when','where','why','been','being','they','them']);\nconst terms = [...new Set((query.toLowerCase().match(/[a-z0-9][a-z0-9._\\/-]{2,}/g) || []))].filter(t => !STOP.has(t));\nconst kwPoints = (((($json) || {}).result) || {}).points || [];  // [] if the keyword arm degraded\nconst keyword = kwPoints\n  .filter(p => p && p.payload && p.payload.text)\n  .map(p => { const low = String(p.payload.text).toLowerCase();\n              return { id: p.id, payload: p.payload, score: null, matched: terms.filter(t => low.includes(t)).length }; })\n  .filter(p => p.matched > 0)\n  .sort((a, b) => b.matched - a.matched);\n\n// --- FUSE ---\nconst fused = new Map();\nfunction fuse(list, arm) {\n  list.forEach((h, i) => {\n    const id = String(h.id);\n    const e = fused.get(id) || { id: h.id, payload: h.payload, score: null, matched: 0, arms: [], rrf: 0 };\n    e.rrf += 1 / (RRF_K + i + 1);\n    e.arms.push(arm);\n    if (h.score != null) e.score = Math.round(Number(h.score) * 1000) / 1000;\n    if (h.matched) e.matched = h.matched;\n    fused.set(id, e);\n  });\n}\nfuse(dense, 'dense');\nfuse(keyword, 'keyword');\n\nconst ranked = [...fused.values()].sort((a, b) => b.rrf - a.rrf).slice(0, topK);\nconst sources = [...new Set(ranked.map(e => e.payload.source_file).filter(Boolean))];\nconst context = ranked.map(e => '[' + (e.payload.source_file || 'doc') + ']\\n' + e.payload.text).join('\\n\\n---\\n\\n');\nconst userPrompt = 'Context:\\n' + context + '\\n\\nQuestion: ' + query;\n// 'matches' is the audit trail: which chunk, its cosine, how many terms hit, and which arm found it.\nconst matches = ranked.map(e => ({ file: e.payload.source_file, score: e.score, terms: e.matched, via: [...new Set(e.arms)].join('+'), rrf: Math.round(e.rrf * 10000) / 10000 }));\n// denseTop/retrieved describe what was REJECTED, so the no-match path can distinguish 'the store is\n// empty' from 'chunks came back but all scored too low' (which usually means minScore is too high).\nconst denseTop = denseAll.length ? Math.round(Math.max(...denseAll.map(h => Number(h.score))) * 1000) / 1000 : 0;\nreturn [{ json: { query, context, userPrompt, sources, matches, minScore, retrieved: denseAll.length, denseTop, denseKept: dense.length, keywordHits: keyword.length, hasHits: ranked.length > 0, hitCount: ranked.length } }];"
+      },
+      "id": "d1000000-0000-4000-8000-000000000005",
+      "name": "Build Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 60, 288 ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            { "id": "hc-1", "leftValue": "={{ $json.hasHits }}", "rightValue": "true", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-000000000006",
+      "name": "Has Context?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ 280, 288 ],
+      "notes": "Retrieved anything? true -> ask the LLM grounded in context; false -> return a clean 'no matching documents' answer without hitting the LLM."
+    },
+    {
+      "parameters": {
+        "operation": "chatCompletion",
+        "llmModel": "qwen3-8b-ov",
+        "systemPrompt": "You answer questions about the stored documents. Use ONLY the provided context. Cite the source file name(s) in square brackets. If the answer is not in the context, reply that you do not have that information in the stored documents. Do not invent facts.",
+        "userMessage": "={{ $('Build Context').first().json.userPrompt }}",
+        "noThink": true,
+        "temperature": 0.1,
+        "maxTokens": 512,
+        "returnFull": false
+      },
+      "id": "d1000000-0000-4000-8000-000000000007",
+      "name": "LLM Answer",
+      "type": "CUSTOM.openVinoModelServer",
+      "typeVersion": 1,
+      "position": [ 500, 176 ],
+      "credentials": { "openVinoModelServerApi": { "id": "FgbuaiNS8y2Idy4b", "name": "OpenVINO Model Server account" } },
+      "notes": "Qwen3-8B via the OpenVINO Model Server (Chat Completion) CUSTOM node -> gateway /v1/chat/completions. Grounded answer from the retrieved context. The node builds the system+user messages, strips <think>, and returns { content }. (Showcases the custom node in WF2; embeddings still use an HTTP node because that op is not yet implemented.)"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Shape the final response: the LLM's answer text + the source files it drew from.\n// The Chat Completion custom node returns { content } (already <think>-stripped); fall back to the\n// raw OpenAI choices shape in case returnFull was ever turned on. Strip <think> defensively either way.\nlet text = String($json.content != null ? $json.content : (((($json.choices || [])[0] || {}).message || {}).content || ''));\nconst close = text.lastIndexOf('</think>');\nif (close !== -1) text = text.slice(close + 8);\ntext = text.replace(/<\\/?think>/gi, '').trim();\nif (!text) text = 'The model returned no answer (its reasoning block used the whole token budget). Try a shorter question or raise max_tokens.';\nconst bc = $('Build Context').first().json;\n// 'matches' shows every retrieved chunk with its score and whether it passed minScore - so a wrong\n// answer can always be traced to what was actually fed to the model.\nreturn [{ json: { answer: text, sources: bc.sources, matches: bc.matches } }];"
+      },
+      "id": "d1000000-0000-4000-8000-000000000008",
+      "name": "Format Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 720, 176 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Neither arm produced anything - answer honestly instead of hallucinating.\n// Distinguish 'the store is empty' from 'chunks came back but all scored too low', because the\n// second case usually means minScore is set too high for this corpus, not that the answer is absent.\nconst bc = $('Build Context').first().json;\nconst retrieved = bc.retrieved || 0;\nconst answer = retrieved\n  ? 'I do not have that information in the stored documents. (' + retrieved + ' chunks were retrieved but none passed the relevance threshold of ' + bc.minScore + ' - the closest scored ' + bc.denseTop + ' - and no keyword matched either. If you expected a match, lower minScore in the Config node.)'\n  : 'No documents are stored yet, or the collection is empty. Process a document through the pipeline first.';\nreturn [{ json: { answer, sources: [], matches: bc.matches || [] } }];"
+      },
+      "id": "d1000000-0000-4000-8000-000000000009",
+      "name": "No Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 500, 432 ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2 },
+          "conditions": [
+            { "id": "wc-1", "leftValue": "={{ $('Config').first().json.viaWebhook }}", "rightValue": "true", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d1000000-0000-4000-8000-00000000000c",
+      "name": "Webhook Call?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ 940, 288 ],
+      "notes": "Was this run started by the HTTP webhook, or called as a tool by the agent? Reads Config.viaWebhook rather than $('RAG Webhook').isExecuted - when the agent calls this workflow the webhook node never runs and is not on the execution path, so referencing it directly throws 'node is unexecuted'. Respond-to-Webhook must only run in the webhook case; a sub-workflow call just returns its data to the caller."
+    },
+    {
+      "parameters": { "respondWith": "firstIncomingItem", "options": {} },
+      "id": "d1000000-0000-4000-8000-00000000000a",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [ 1160, 176 ],
+      "notes": "Returns the incoming item {answer, sources} as the webhook's JSON response."
+    },
+    {
+      "parameters": {},
+      "id": "d1000000-0000-4000-8000-00000000000d",
+      "name": "Return to Caller",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [ 1160, 432 ],
+      "notes": "Terminal node when called as a tool. Its output {answer, sources} is what the agentic workflow receives."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "RAG Webhook": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "When Executed by Another Workflow": { "main": [ [ { "node": "Config", "type": "main", "index": 0 } ] ] },
+    "Config": { "main": [ [ { "node": "Embed Query", "type": "main", "index": 0 } ] ] },
+    "Embed Query": { "main": [ [ { "node": "Qdrant Search", "type": "main", "index": 0 } ] ] },
+    "Qdrant Search": { "main": [ [ { "node": "Keyword Search", "type": "main", "index": 0 } ] ] },
+    "Keyword Search": { "main": [ [ { "node": "Build Context", "type": "main", "index": 0 } ] ] },
+    "Build Context": { "main": [ [ { "node": "Has Context?", "type": "main", "index": 0 } ] ] },
+    "Has Context?": { "main": [ [ { "node": "LLM Answer", "type": "main", "index": 0 } ], [ { "node": "No Match", "type": "main", "index": 0 } ] ] },
+    "LLM Answer": { "main": [ [ { "node": "Format Answer", "type": "main", "index": 0 } ] ] },
+    "Format Answer": { "main": [ [ { "node": "Webhook Call?", "type": "main", "index": 0 } ] ] },
+    "No Match": { "main": [ [ { "node": "Webhook Call?", "type": "main", "index": 0 } ] ] },
+    "Webhook Call?": { "main": [ [ { "node": "Respond", "type": "main", "index": 0 } ], [ { "node": "Return to Caller", "type": "main", "index": 0 } ] ] }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "meta": {},
+  "tags": []
+}
