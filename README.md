@@ -50,55 +50,58 @@ Custom [n8n](https://n8n.io) nodes + a native [OpenVINO™](https://docs.openvin
 
 ## How it works
 
-Only **one process** ever talks to the chips: the gateway. It holds every model in memory and exposes an OpenAI-compatible API, so the n8n nodes stay simple HTTP clients and a 7B model is never reloaded per request.
+Only **one process** ever talks to the chips: the gateway. It holds every model in memory and exposes an OpenAI-compatible API, so the n8n workflows stay simple HTTP clients and a 7B model is never reloaded per request.
+
+### When you drop in a document
 
 ```mermaid
-flowchart TB
-    subgraph you[" "]
-        direction LR
-        DOC["📄 Your documents<br/>PDF · PNG · JPG"]
-        Q["💬 Your questions"]
-    end
+flowchart LR
+    A["📄 PDF or photo<br/>dropped in a folder"] --> B{"Is this really<br/>a document?"}
+    B -->|no| R["<b>rejected/</b><br/><i>kept, never deleted</i>"]
+    B -->|yes| C["Read every word"]
+    C --> D["Pull out the fields<br/>and check them"]
+    D --> E["Split into chunks<br/>and index the meaning"]
+    E --> QD[("Qdrant<br/><i>searchable</i>")]
+    D --> PG[("PostgreSQL<br/><i>what was processed</i>")]
 
-    subgraph n8n["n8n — workflows you can edit visually"]
-        direction LR
-        WF1["<b>Document pipeline</b><br/>triage → read → extract → store"]
-        WF2["<b>Ask your documents</b><br/>search → grounded answer"]
-        AG["<b>Agent chatbot</b><br/>picks its own tool"]
-    end
+    B -.- b1["<b>CLIP · NPU</b> · ~20 ms"]
+    C -.- c1["<b>Qwen2.5-VL · GPU</b>"]
+    D -.- d1["<b>Qwen3 · GPU</b>"]
+    E -.- e1["<b>BGE · CPU</b>"]
 
-    GW["<b>OpenVINO gateway</b> — the only process that touches the silicon<br/><code>/document/infer</code> · <code>/embeddings</code> · <code>/chat/completions</code>"]
-
-    subgraph chips["Your Intel AI PC"]
-        direction LR
-        NPU["<b>NPU</b><br/>CLIP triage<br/><i>~20 ms glance</i>"]
-        GPU["<b>GPU</b><br/>Qwen2.5-VL reads documents<br/>Qwen3 reasons and answers"]
-        CPU["<b>CPU</b><br/>BGE embeddings"]
-    end
-
-    subgraph store["Stored on your machine"]
-        direction LR
-        PG[("PostgreSQL<br/><i>what was processed</i>")]
-        QD[("Qdrant<br/><i>searchable meaning</i>")]
-    end
-
-    DOC --> WF1
-    Q --> WF2
-    Q --> AG
-    AG -.->|calls as a tool| WF2
-    WF1 --> GW
-    WF2 --> GW
-    GW --> NPU & GPU & CPU
-    WF1 --> PG & QD
-    WF2 -.->|reads| QD
-
-    classDef band fill:#f6f3fe,stroke:#c9b8f5,color:#1c1230
-    classDef gw fill:#6c24f0,stroke:#4a17ab,color:#ffffff
-    class n8n,chips,store,you band
-    class GW gw
+    classDef chip fill:#f3ecfe,stroke:#b794f6,color:#3b2063,font-size:11px
+    classDef store fill:#ede7fb,stroke:#8b5cf6,color:#2b1a4d
+    classDef drop fill:#fdf2f2,stroke:#e0b4b4,color:#5a2a2a
+    class b1,c1,d1,e1 chip
+    class QD,PG store
+    class R drop
 ```
 
-**In one sentence:** a document is glanced at by the NPU, read by the GPU, turned into searchable meaning by the CPU, and stored locally — then your questions search that store and are answered by the GPU, grounded only in what was found.
+The cheap check runs first: a tiny model on the NPU decides in about 20 milliseconds whether something is worth reading, so a screenshot or a selfie never costs you a 7B vision model. Anything rejected goes to a folder you can see — nothing is ever silently thrown away.
+
+### When you ask a question
+
+```mermaid
+flowchart LR
+    Q["💬 Your question"] --> E["Turn it into meaning"]
+    E --> S{"Search two ways"}
+    S --> V["by meaning<br/><i>finds paraphrases</i>"]
+    S --> K["by exact words<br/><i>finds IDs like INV-2024-0891</i>"]
+    V --> F["Rank and combine"]
+    K --> F
+    F --> A["Answer using only<br/>the passages found"]
+    A --> O["✅ Answer + the file<br/>it came from"]
+
+    E -.- e1["<b>BGE · CPU</b>"]
+    A -.- a1["<b>Qwen3 · GPU</b>"]
+
+    classDef chip fill:#f3ecfe,stroke:#b794f6,color:#3b2063,font-size:11px
+    classDef good fill:#ede7fb,stroke:#8b5cf6,color:#2b1a4d
+    class e1,a1 chip
+    class O good
+```
+
+Searching two ways matters: meaning-based search understands that "what were the taxes" and "GST" are the same question, but it cannot find an invoice number — that string looks like noise to it. Word matching is the opposite. Running both and combining them by rank covers each one's blind spot.
 
 ---
 
