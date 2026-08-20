@@ -1,0 +1,29 @@
+{
+  "_comment": "Lunar Lake chip navigation: OCR/super-res CNNs on GPU, light models on CPU. NPU is not reachable from a WSL2 container, so it is not targeted here (use native OpenVINO for NPU benchmarks). If GPU init fails, switch a model back to AUTO for a safe CPU fallback. Mount this as /config.json on the `ovms` service on Lunar Lake.",
+  "model_config_list": [
+    {
+      "config": {
+        "name": "text-sr",
+        "base_path": "/models/text-sr",
+        "target_device": "GPU",
+        "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
+      }
+    },
+    {
+      "config": {
+        "name": "ppocr-det",
+        "base_path": "/models/ppocr-det",
+        "target_device": "GPU",
+        "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
+      }
+    },
+    {
+      "config": {
+        "name": "ppocr-rec",
+        "base_path": "/models/ppocr-rec",
+        "target_device": "GPU",
+        "plugin_config": { "PERFORMANCE_HINT": "LATENCY" }
+      }
+    }
+  ]
+}

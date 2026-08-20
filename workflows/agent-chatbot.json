@@ -1,0 +1,339 @@
+{
+  "name": "Agent Chatbot",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        16
+      ],
+      "id": "849ac1e0-7bed-4989-bf98-0757e4fbe699",
+      "name": "When chat message received",
+      "webhookId": "debbcd07-f76a-4dd4-8d5c-20657a3bdcd1"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.body?.chatInput || $json.chatInput || $json.message}}",
+        "options": {
+          "systemMessage": "You are a document assistant. You answer ONLY questions about the user's processed documents,\nand ONLY from tool results \u2014 never from your own knowledge. If a tool returns nothing relevant,\nsay \"I don't have that in the processed documents.\" Never guess.\n\nHOW TO ANSWER\n- Each question is INDEPENDENT. ALWAYS run the appropriate tool for the CURRENT question, even\n  if earlier turns discussed other documents. NEVER decide whether a document exists or is\n  processed \u2014 or answer its content \u2014 from memory or previous answers; always check with the\n  tool. Use prior conversation ONLY to resolve pronouns (\"it\", \"that one\"), never as a source\n  of document facts.\n- Decide ONE tool, call it, then answer from what it returns. Do NOT call another tool unless\n  the first returned an error.\n- Keep answers to AT MOST 3 short sentences. State the facts, then STOP. Never pad, list\n  synonyms, or keep writing after you have answered.\n\nTOOL INPUT \u2014 pass the user's question to search_documents VERBATIM. Do not shorten it, rewrite\nit, or reduce it to keywords. Retrieval quality depends on the full question; a trimmed query\nfinds worse passages and you will answer worse because of it.\n\nRELAYING TOOL RESULTS \u2014 the tool returns a complete, grounded answer. Keep its specifics: names,\nnumbers, dates and concrete details must survive into your reply exactly as given. Never\ngeneralise \"verifying device switching works on a clean setup\" into \"performance testing\" \u2014 that\nturns a correct answer into a vague one. If the tool's answer is already good, relay it almost\nas-is instead of rewriting it. If the tool names people, list those names.\n\nDECIDE THE TOOL FIRST\nIf the question contains any of: how many, count, number of, list, which, what types, all\ndocuments, flagged, in review, by date, total, average \u2014 you MUST call query_records with a\nSELECT. Examples:\n- \"how many documents\" -> sql = \"SELECT count(*) FROM pipeline_documents\"\n- \"list all documents\" -> sql = \"SELECT file_name, document_type, status FROM pipeline_documents ORDER BY created_at DESC\"\n- \"what types of documents\" -> sql = \"SELECT document_type, count(*) AS n FROM pipeline_documents GROUP BY document_type\"\n- \"how many are flagged\" -> sql = \"SELECT count(*) FROM pipeline_documents WHERE decision = 'flagged' OR status = 'reviewed'\"\nOtherwise \u2014 what a document SAYS or MEANS, summaries, specific values \u2014 call search_documents.\nNever answer a count/list/type question from search_documents, and never answer a content\nquestion from query_records.\n\nACTIONS (these are not questions \u2014 do NOT search for them):\n- \"process this file\" / \"process the doc in incoming\" / \"run the pipeline\":\n  Processing is AUTOMATIC. Any file in the incoming folder is picked up by the document\n  pipeline within about 30 seconds. Reply that it is already queued and they can watch its\n  progress on the Documents page. Do NOT call any tool. STOP.\n- Anything else not about the user's documents: answer in one short line without calling a tool.\n\nTOOL FAILURE RULE \u2014 this prevents loops:\nIf a tool returns an error, or returns nothing useful, say so plainly in ONE sentence and STOP.\nNEVER call the same tool twice. NEVER try a different tool to compensate for one that returned\nnothing.\n\nTOOLS\n1. search_documents \u2014 semantic search over document CONTENT. For summaries, specific values,\n   \"what does X say\", \"who are the mentors\", \"what is the CGST on the invoice\".\n2. query_records \u2014 a READ-ONLY PostgreSQL SELECT over the metadata table. You MUST pass a full\n   SELECT string in the \"sql\" argument. Never call it without \"sql\".\n3. process_document \u2014 ingest a NEW file. ONLY when the user explicitly asks to process a\n   specific file. Never use it to answer questions.\n\nDATABASE SCHEMA for query_records\npipeline_documents(id, file_name, mime_type, file_size, document_type, decision, reason,\nconfidence, ocr_confidence, fields (jsonb), summary, status, created_at, updated_at)\n- decision: enriched | flagged | duplicate\n- status: processing | processed | flagged | duplicate | reviewed | failed\n- \"in review\" / \"flagged for review\" = status = 'reviewed' OR decision = 'flagged'\n- fields is JSONB, keys vary per document (fields->>'vendor', fields->>'total')\n- date ranges use created_at, e.g. created_at >= now() - interval '7 days'\n\nCITATIONS \u2014 MANDATORY: after any search_documents answer, end with a new line exactly:\nSources: <comma-separated source_file values from the tool's sources field>\nCopy them verbatim from the tool result \u2014 list ONLY what the tool returned, never add a file\nyou think might be relevant. Do NOT add a Sources line for query_records answers."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        416,
+        0
+      ],
+      "id": "1c020f65-d945-4abd-8edc-44c61d1d5a1c",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "description": "Ingest and process a NEW document file that has not been seen before. Only use when the user provides a file to process. Do NOT use this to answer questions about existing documents.\n\n",
+        "workflowId": {
+          "__rl": true,
+          "value": "HqNfM6AdXEoQVHjS",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/HqNfM6AdXEoQVHjS",
+          "cachedResultName": "Smart Document Processing (WF1)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        672,
+        208
+      ],
+      "id": "f53d0b01-73cd-46df-8a91-39cfcff627f5",
+      "name": "Call 'Smart Document Processing (WF1)'"
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.body?.sessionId || $json.sessionId || 'web' }}",
+        "contextWindowLength": 4
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.4,
+      "position": [
+        416,
+        208
+      ],
+      "id": "76aea7a1-a47f-42ac-8069-09a31c18c861",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "description": "Search and answer questions about documents that have ALREADY been processed and stored. Use this whenever the user asks a question about their documents, invoices, receipts, totals, taxes, vendors, or any past file. Do NOT use this to process or ingest a new file.\n\n",
+        "workflowId": {
+          "__rl": true,
+          "value": "RpTb8kEYK1bsuOsL",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/RpTb8kEYK1bsuOsL",
+          "cachedResultName": "RAG Q&A (WF2)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query": "={{ $('When chat message received').item.json.chatInput }}"
+          },
+          "matchingColumns": [
+            "query"
+          ],
+          "schema": [
+            {
+              "id": "query",
+              "displayName": "query",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        544,
+        208
+      ],
+      "id": "c685e715-cc49-4491-baa6-15d8c75fc6cc",
+      "name": "Call 'RAG Q&A (WF2)'"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "qwen3-8b-ov",
+          "mode": "list",
+          "cachedResultName": "qwen3-8b-ov"
+        },
+        "builtInTools": {},
+        "options": {
+          "maxTokens": 500
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        272,
+        208
+      ],
+      "id": "21e0f5f5-e54c-490e-aadc-cc09f55bc690",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "cWxPA4Em6px9ZECD",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "description": "Run a read-only SQL SELECT over the document metadata table to answer counts, lists, filters, and aggregates \u2014 e.g. how many documents, which vendors, list everything flagged, documents by type or date.",
+        "workflowId": {
+          "__rl": true,
+          "value": "1uevR59G64Zovikl",
+          "mode": "list",
+          "cachedResultUrl": "/workflow/1uevR59G64Zovikl",
+          "cachedResultName": "Query Records (SQL tool)"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "sql": "={{ $fromAI('sql', 'the SQL SELECT query to run', 'string') }}"
+          },
+          "matchingColumns": [
+            "sql"
+          ],
+          "schema": [
+            {
+              "id": "sql",
+              "displayName": "sql",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "canBeUsedToMatch": true,
+              "type": "string",
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [
+        816,
+        208
+      ],
+      "id": "eb1334e7-c034-4292-98a0-4375db11892b",
+      "name": "Call 'Query Records (SQL tool)'"
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "message"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -16,
+        192
+      ],
+      "id": "e0522f7a-585e-44bb-a405-859854c1370c",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "agent-chat",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -16,
+        368
+      ],
+      "id": "1f3d26a2-6b7c-4a49-af4d-2cb0c1caa89f",
+      "name": "Webhook",
+      "webhookId": "6396fd12-7a81-499f-9b01-de6352e21bf4"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call 'Smart Document Processing (WF1)'": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call 'RAG Q&A (WF2)'": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call 'Query Records (SQL tool)'": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        []
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "dae33e43-ec28-49af-a780-a9dafe052788",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "7c24da944417eef2fdc11b4bcf975a758de206d4a8eaa093edc3651941cd7334"
+  },
+  "nodeGroups": [],
+  "id": "YswTV0a9BEDUPUAA",
+  "tags": []
+}
