@@ -116,7 +116,10 @@ Install these first — each links to its installer.
 | [Python](https://www.python.org/downloads/) | 3.10 or newer | `python --version` |
 | [PostgreSQL](https://www.postgresql.org/download/) | 14 or newer | `psql --version` |
 | [Qdrant](https://github.com/qdrant/qdrant/releases) | latest binary | `./qdrant --version` |
-| [n8n](https://docs.n8n.io/hosting/installation/npm/) | latest | `npm i -g n8n` then `n8n --version` |
+| [n8n](https://docs.n8n.io/hosting/installation/npm/) | **1.60 or newer** | `npm i -g n8n` then `n8n --version` |
+
+> [!IMPORTANT]
+> n8n must be **1.60+**. The agent chatbot uses newer AI nodes that older versions cannot import.
 
 > [!TIP]
 > On Windows, install PostgreSQL with the default `postgres` superuser and remember the password — you'll need it in Step 4.
@@ -240,7 +243,7 @@ Then, **once per workflow**:
 1. **Credentials** — open any red-flagged node and create/select:
    - **OpenVINO Model Server** → Gateway URL `http://127.0.0.1:8000`
    - **Postgres** → your database, user and password from Step 4
-2. **Config node** — open the `Config` node in each workflow and set `docRoot` to your folder from Step 3. Everything else can stay as-is.
+2. **Config node** — open the `Config` node in the **document pipeline** and set `docRoot` to your folder from Step 3. The other workflows' Config nodes only hold service URLs, which already point at localhost.
 3. **Agent chatbot only** — its three tool nodes point at workflow IDs from another machine, so open each `Call '...'` node and re-select the workflow from the dropdown. Also select your OpenAI-compatible credential on the `OpenAI Chat Model` node, with the base URL set to `http://127.0.0.1:8000/v1`.
 
 ---

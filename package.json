@@ -19,7 +19,7 @@
   },
   "main": "dist/nodes/OpenVinoModelServer/OpenVinoModelServer.node.js",
   "scripts": {
-    "build": "tsc && find nodes -name '*.svg' -exec cp --parents {} dist/ \\; && find nodes -name '*.proto' -exec cp --parents {} dist/ \\;",
+    "build": "tsc && node scripts/copy-assets.mjs",
     "dev": "tsc --watch",
     "test": "jest",
     "test:watch": "jest --watch",
