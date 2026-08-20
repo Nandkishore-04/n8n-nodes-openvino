@@ -1,0 +1,41 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  /* Strict palette: pure black canvas, OpenVINO purple, white. */
+  @apply bg-black text-white antialiased;
+  background-image:
+    radial-gradient(55rem 55rem at 85% -15%, rgba(108, 36, 240, 0.14), transparent 60%),
+    radial-gradient(45rem 45rem at -10% 115%, rgba(108, 36, 240, 0.07), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* Slim, modern scrollbars */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  @apply rounded-full bg-white/10;
+}
+*::-webkit-scrollbar-thumb:hover {
+  @apply bg-white/20;
+}
+
+/* Frosted card surface used across the app */
+.glass {
+  @apply rounded-2xl border border-white/[0.08] bg-white/[0.02] backdrop-blur-sm;
+}

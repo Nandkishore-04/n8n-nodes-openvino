@@ -45,3 +45,6 @@ kernel.errors.txt
 /*.jpeg
 /*.jpg
 /*.png
+
+# Transfer artifacts (local only)
+*.zip

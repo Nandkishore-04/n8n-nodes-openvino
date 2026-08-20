@@ -4,9 +4,9 @@
 
 # n8n-nodes-openvino
 
-**Agentic AI document workflows that run entirely on your Intel AI PC — CPU, GPU, or NPU. No cloud, no API keys, no data leaving your machine.**
+**Drag-and-drop AI workflows that run entirely on your Intel AI PC — CPU, GPU and NPU. No cloud, no API keys, no data leaving your machine.**
 
-Custom [n8n](https://n8n.io) nodes + a native [OpenVINO™](https://docs.openvino.ai) gateway that turn any PDF or image into structured, validated, searchable data — with an on-device AI agent doing the reasoning.
+Custom [n8n](https://n8n.io) nodes + a native [OpenVINO™](https://docs.openvino.ai) gateway that turn any PDF or image into structured, searchable data — then let you ask questions about it in plain English.
 
 > **Google Summer of Code 2026** · **OpenVINO (Intel)**
 > Contributor: Nand Kishore R · Mentors: Praveen Kundurthy & Max Domeika
@@ -15,106 +15,171 @@ Custom [n8n](https://n8n.io) nodes + a native [OpenVINO™](https://docs.openvin
 
 ---
 
-## What it does — Smart Document Processing
+## What you get
 
-Drop a document in a folder (or upload it), and it flows through a fully local pipeline:
+| | What it does |
+|---|---|
+| 📄 **Document pipeline** | Drop in a PDF or photo → it decides whether it's a real document, reads it, extracts the fields, validates them, and stores it — automatically. |
+| 💬 **Ask your documents** | Ask a question in plain English. Answers are grounded in your documents only, and always cite the file they came from. |
+| 🤖 **Agent chatbot** | A conversational layer that picks its own tool: search the documents, or query the database for counts and lists. |
+| 🖥️ **Web dashboard** | Watch documents move through the pipeline live, and chat with them. Optional — everything works from n8n alone. |
 
-```
-File → dedup (sha256) → 🔍 CLIP triage (NPU) → OCR (VLM, GPU) → 🤖 Agent extract + validate → Postgres + Qdrant
-                             │                                        │
-                        not a document?                          enriched / flagged / duplicate
-                             ↓                                        ↓
-                     rejected/ (recoverable)                   processed/  •  searchable
-```
-
-- **CLIP triage on the NPU** — a real vision transformer decides *"is this a processable document?"* in ~20 ms before any heavy work; photos/selfies are rejected (recoverably), never silently dropped.
-- **VLM OCR on the GPU** — Qwen2.5-VL reads layout, tables, and degraded scans near-perfectly; digital PDFs use the exact text layer.
-- **On-device agent** — Qwen3-8B extracts a schema it picks per document type, then a deterministic validation layer checks the math (line-items → subtotal → tax → total, amount-in-words, coverage).
-- **Stored + searchable** — queryable metadata in Postgres, embeddings in Qdrant, full audit trail.
-
-Every model runs on **Intel silicon via OpenVINO** — the right chip for each job (NPU for the glance, GPU for accuracy).
+**Everything runs on your machine.** The only network traffic is downloading the models, once.
 
 ---
 
-## Prerequisites — install these first
+## Hardware requirements
 
-You need **five** things on your machine before setup. Install them in this order:
+> [!IMPORTANT]
+> This project targets **Intel** hardware. It will run on any x86 CPU, but the acceleration story needs an Intel GPU or NPU.
 
-| # | What | Why | How to get it |
-|---|---|---|---|
-| 1 | **Intel hardware** | runs the AI models | An **Intel AI PC** (Core Ultra — Lunar Lake / Meteor Lake) with GPU + NPU. *No AI PC? An Intel box with just a GPU still works (triage falls back to GPU). macOS/AMD = CPU-only, slow — not recommended.* |
-| 2 | **Node.js 20+** | runs n8n + builds the nodes | [nodejs.org](https://nodejs.org) → download the LTS installer. Verify: `node -v` |
-| 3 | **Python 3.10+** | runs the gateway | [python.org](https://python.org) → install, **tick "Add to PATH"**. Verify: `python --version` |
-| 4 | **PostgreSQL** | stores document metadata | [postgresql.org/download](https://www.postgresql.org/download/) → install, **remember the password you set**. Verify: `psql --version` |
-| 5 | **Qdrant** | stores search vectors | Download the binary from [github.com/qdrant/qdrant/releases](https://github.com/qdrant/qdrant/releases) — run it so it listens on port `6333`. |
+| | Minimum | Recommended |
+|---|---|---|
+| **CPU** | Any modern x86-64 | Intel® Core™ Ultra (Meteor Lake / Lunar Lake or newer) |
+| **NPU** | not required | **Intel® AI Boost NPU** — runs the document triage |
+| **GPU** | not required | **Intel® Arc™ / Iris® Xe integrated graphics** — runs the vision + language models |
+| **RAM** | 16 GB | **32 GB** (all models resident at once) |
+| **Disk** | 20 GB free | 30 GB free — the models are ~12 GB |
+| **OS** | Windows 11 or Linux | Windows 11 (the tested path) |
 
-> **Why run it "natively" (not in Docker)?** On **Windows**, Docker/Podman run inside a WSL2 Linux VM that **cannot reach the Intel NPU/GPU** — so the AI gateway runs directly on your OS. This native path works on **both Windows and Linux**. *(A container option for Linux-only users is in [Containers](#containers-linux-experimental).)*
+**No Intel GPU or NPU?** Everything still works on CPU — just slower. Swap the device flags in [Step 5](#step-5--start-the-ai-gateway).
+
+**macOS is out of scope** — there is no Intel NPU on Apple silicon.
+
+---
+
+## How it works
+
+Only **one process** ever talks to the chips: the gateway. It holds every model in memory and exposes an OpenAI-compatible API, so the n8n nodes stay simple HTTP clients and a 7B model is never reloaded per request.
+
+```mermaid
+flowchart TB
+    subgraph you[" "]
+        direction LR
+        DOC["📄 Your documents<br/>PDF · PNG · JPG"]
+        Q["💬 Your questions"]
+    end
+
+    subgraph n8n["n8n — workflows you can edit visually"]
+        direction LR
+        WF1["<b>Document pipeline</b><br/>triage → read → extract → store"]
+        WF2["<b>Ask your documents</b><br/>search → grounded answer"]
+        AG["<b>Agent chatbot</b><br/>picks its own tool"]
+    end
+
+    GW["<b>OpenVINO gateway</b> — the only process that touches the silicon<br/><code>/document/infer</code> · <code>/embeddings</code> · <code>/chat/completions</code>"]
+
+    subgraph chips["Your Intel AI PC"]
+        direction LR
+        NPU["<b>NPU</b><br/>CLIP triage<br/><i>~20 ms glance</i>"]
+        GPU["<b>GPU</b><br/>Qwen2.5-VL reads documents<br/>Qwen3 reasons and answers"]
+        CPU["<b>CPU</b><br/>BGE embeddings"]
+    end
+
+    subgraph store["Stored on your machine"]
+        direction LR
+        PG[("PostgreSQL<br/><i>what was processed</i>")]
+        QD[("Qdrant<br/><i>searchable meaning</i>")]
+    end
+
+    DOC --> WF1
+    Q --> WF2
+    Q --> AG
+    AG -.->|calls as a tool| WF2
+    WF1 --> GW
+    WF2 --> GW
+    GW --> NPU & GPU & CPU
+    WF1 --> PG & QD
+    WF2 -.->|reads| QD
+
+    classDef band fill:#f6f3fe,stroke:#c9b8f5,color:#1c1230
+    classDef gw fill:#6c24f0,stroke:#4a17ab,color:#ffffff
+    class n8n,chips,store,you band
+    class GW gw
+```
+
+**In one sentence:** a document is glanced at by the NPU, read by the GPU, turned into searchable meaning by the CPU, and stored locally — then your questions search that store and are answered by the GPU, grounded only in what was found.
 
 ---
 
 ## Setup
 
-Seven steps. Each command is copy-paste ready — **only the parts in `<angle brackets>` need replacing.**
+Seven steps. Budget ~30 minutes, most of it model downloads.
+
+### Prerequisites
+
+Install these first — each links to its installer.
+
+| | Version | Check it worked |
+|---|---|---|
+| [Node.js](https://nodejs.org) | 18 or newer | `node -v` |
+| [Python](https://www.python.org/downloads/) | 3.10 or newer | `python --version` |
+| [PostgreSQL](https://www.postgresql.org/download/) | 14 or newer | `psql --version` |
+| [Qdrant](https://github.com/qdrant/qdrant/releases) | latest binary | `./qdrant --version` |
+| [n8n](https://docs.n8n.io/hosting/installation/npm/) | latest | `npm i -g n8n` then `n8n --version` |
+
+> [!TIP]
+> On Windows, install PostgreSQL with the default `postgres` superuser and remember the password — you'll need it in Step 4.
 
 ### Step 1 — Get the code and build the nodes
+
 ```bash
-git clone https://github.com/Nandkishore-04/n8n-nodes-openvino
+git clone https://github.com/Nandkishore-04/n8n-nodes-openvino.git
 cd n8n-nodes-openvino
-npm install && npm run build
+npm install
+npm run build          # compiles the custom nodes into dist/
+pip install -r deployment/requirements.gateway.txt
 ```
-This compiles the two custom n8n nodes into `dist/`. *(Takes a minute or two.)*
+
+✅ **Done when** `dist/` exists and `npm test` passes.
 
 ### Step 2 — Download the AI models
-The gateway uses four models. Here's what each does:
 
-| Model | Job (chip) | ~Size |
-|---|---|---|
-| **Qwen2.5-VL-7B** | reads the document — OCR (GPU) | ~6 GB |
-| **Qwen3-8B** | the reasoning agent (GPU) | ~5 GB |
-| **BGE** | search embeddings (CPU) | ~0.2 GB |
-| **CLIP ViT-B/32** | the "is this a document?" glance (NPU) | built locally |
-
-First install the Python libraries + the downloader:
 ```bash
-pip install openvino-genai "optimum[openvino]" opencv-python pymupdf numpy torch transformers "huggingface_hub[cli]"
-```
-Then run these from the repo root — each drops the model into the folder the gateway expects:
-```bash
-# OCR model (GPU)
+pip install huggingface-hub
 huggingface-cli download OpenVINO/Qwen2.5-VL-7B-Instruct-int4-ov --local-dir deployment/models/qwen2.5-vl-7b
-
-# Agent LLM (GPU)
-huggingface-cli download OpenVINO/Qwen3-8B-int4-ov --local-dir deployment/models/qwen3-8b-ov
-
-# Triage model — built locally, not downloaded (creates deployment/models/clip/)
-python scripts/convert_clip.py
+huggingface-cli download OpenVINO/Qwen3-8B-int4-ov            --local-dir deployment/models/qwen3-8b-ov
+python scripts/convert_clip.py     # builds the NPU triage model locally
 ```
-*(BGE embeddings download automatically on first run — no command needed. Total download ≈ 11 GB, so use a good connection.)*
+
+✅ **Done when** `deployment/models/` contains `qwen2.5-vl-7b/`, `qwen3-8b-ov/` and `clip/`.
+⏱️ ~12 GB of downloads — this is the slow step.
 
 ### Step 3 — Create the document folders
-The pipeline moves files between five folders. Pick **one** parent folder (this is your **`docRoot`** — you'll need it again in Step 6):
+
+This is where you drop files. Pick any path and remember it — it's your **docRoot**.
+
 ```bash
 # Linux / macOS
-mkdir -p ~/proj-demo/{incoming,processing,processed,failed,rejected}
-```
-```powershell
+mkdir -p ~/openvino-docs/{incoming,processing,processed,failed,rejected}
+
 # Windows (PowerShell)
-mkdir C:\Users\<you>\proj-demo\incoming, C:\Users\<you>\proj-demo\processing, C:\Users\<you>\proj-demo\processed, C:\Users\<you>\proj-demo\failed, C:\Users\<you>\proj-demo\rejected
+mkdir $HOME\openvino-docs\incoming, $HOME\openvino-docs\processing, `
+      $HOME\openvino-docs\processed, $HOME\openvino-docs\failed, $HOME\openvino-docs\rejected
 ```
 
 ### Step 4 — Set up the databases
-**Postgres** — create the tables (replace `<user>` and `<db>` with what you set during install, usually `postgres`/`postgres`):
+
+**PostgreSQL** — stores what was processed:
 ```bash
-psql -h localhost -U <user> -d <db> -f deployment/sql/init.sql
-```
-**Qdrant** — just start it; it listens on `6333` automatically:
-```bash
-./qdrant          # Linux/macOS
-.\qdrant.exe      # Windows
+psql -h localhost -U postgres -d postgres -f deployment/sql/init.sql
 ```
 
+**Qdrant** — start it, then create the collection:
+```bash
+./qdrant                            # Linux/macOS   (leave running)
+.\qdrant.exe                        # Windows
+
+python scripts/setup_qdrant.py      # in a new terminal
+```
+
+> [!WARNING]
+> Don't skip `setup_qdrant.py`. Qdrant doesn't create collections on its own, and the word-matching half of search needs an index that this script builds. Without it the pipeline fails on the first document, and search quietly gets worse with no error message.
+
 ### Step 5 — Start the AI gateway
-This one process loads the models and talks to the chips. **Replace only the two `<...>` paths**, then run:
+
+One process, loads the models, talks to the chips. **Leave this terminal running.**
+
 ```bash
 python scripts/native_gateway.py \
   --models deployment/models \
@@ -123,70 +188,156 @@ python scripts/native_gateway.py \
   --ocr-device GPU --llm-device GPU --clip-device NPU \
   --port 8000
 ```
-✅ **You're good when you see:** `Ready -> http://127.0.0.1:8000` and `CLIP document triage -> NPU`.
 
-- **No NPU?** change `--clip-device NPU` → `--clip-device GPU`.
-- **No GPU either?** use `--ocr-device CPU --llm-device CPU --clip-device CPU` (works, just slower).
-- **Remote access?** it's local-only by default — add `--host 0.0.0.0 --api-key <your-secret>` only if you truly need it.
+✅ **Done when** you see `Ready -> http://127.0.0.1:8000` and `CLIP document triage -> NPU`.
+⏱️ First start takes a minute or two while models compile for your hardware.
 
-> Leave this terminal running. Open a **new** terminal for the next step.
+**Adjust for your machine:**
+
+| Situation | Change |
+|---|---|
+| No NPU | `--clip-device GPU` |
+| No Intel GPU either | `--ocr-device CPU --llm-device CPU --clip-device CPU` |
+| Need remote access | add `--host 0.0.0.0 --api-key <your-secret>` (local-only by default) |
 
 ### Step 6 — Start n8n
-Set three environment variables, then launch n8n **in the same terminal window** (they must be set in the session that runs `n8n`). Replace `<repo>` with the full path to this folder and `<docRoot>` with your folder from Step 3:
+
+Set three variables and start n8n **in the same terminal window** — they must be set in the session that runs it.
+
 ```bash
 # Linux / macOS
-export N8N_CUSTOM_EXTENSIONS="<repo>/dist"
-export NODE_FUNCTION_ALLOW_BUILTIN="fs,crypto"
-export N8N_RESTRICT_FILE_ACCESS_TO="<docRoot>"
-npx n8n
+export N8N_CUSTOM_EXTENSIONS=$(pwd)/dist
+export NODE_FUNCTION_ALLOW_BUILTIN=fs,crypto
+export N8N_RESTRICT_FILE_ACCESS_TO=$HOME/openvino-docs
+n8n start
 ```
 ```powershell
 # Windows (PowerShell)
-$env:N8N_CUSTOM_EXTENSIONS="<repo>\dist"
+$env:N8N_CUSTOM_EXTENSIONS="<full-path-to-repo>\dist"
 $env:NODE_FUNCTION_ALLOW_BUILTIN="fs,crypto"
-$env:N8N_RESTRICT_FILE_ACCESS_TO="C:/Users/<you>/proj-demo"
-npx n8n
+$env:N8N_RESTRICT_FILE_ACCESS_TO="$HOME\openvino-docs"
+n8n start
 ```
-Open **http://localhost:5678** in your browser.
 
-> ⚠️ On Windows these variables only apply to the **current** PowerShell window. If you close it, set them again before running `n8n`.
+✅ **Done when** http://localhost:5678 opens and searching for "OpenVINO" in the node panel shows your custom nodes.
 
-### Step 7 — Import and configure the workflow
-Inside n8n (http://localhost:5678):
-1. **Import** → select `workflows/smart-document-pipeline.json`
-2. Open the **`Config`** node → set **`docRoot`** to your folder from Step 3. *(Leave `gatewayUrl` / `qdrantUrl` as-is unless you changed the ports.)*
-3. Add the two **credentials** it asks for:
-   - **Postgres** → the host/user/password you set in Step 4
+> [!TIP]
+> Seeing `Unrecognized node type: CUSTOM.openVinoModelServer`? `N8N_CUSTOM_EXTENSIONS` didn't reach n8n — set it and start n8n in the *same* window, and use `n8n start` rather than `npx n8n`.
+
+### Step 7 — Import the workflows
+
+In n8n: **Workflows → Import from File**, then repeat for each:
+
+| File | What it is | Activate? |
+|---|---|---|
+| `workflows/smart-document-pipeline.json` | the document pipeline | ✅ yes |
+| `workflows/rag-qa.json` | ask your documents | ✅ yes |
+| `workflows/query-records.json` | database tool for the agent | ⬜ no (called as a tool) |
+| `workflows/agent-chatbot.json` | conversational agent that picks its own tool | ✅ yes |
+
+Then, **once per workflow**:
+
+1. **Credentials** — open any red-flagged node and create/select:
    - **OpenVINO Model Server** → Gateway URL `http://127.0.0.1:8000`
-4. Click **Active** (top-right) to turn the workflow on.
+   - **Postgres** → your database, user and password from Step 4
+2. **Config node** — open the `Config` node in each workflow and set `docRoot` to your folder from Step 3. Everything else can stay as-is.
+3. **Agent chatbot only** — its three tool nodes point at workflow IDs from another machine, so open each `Call '...'` node and re-select the workflow from the dropdown. Also select your OpenAI-compatible credential on the `OpenAI Chat Model` node, with the base URL set to `http://127.0.0.1:8000/v1`.
 
-### ✅ Run it
-Drop a PDF or image into the **`incoming/`** folder. Within seconds:
-- a **real document** → read, extracted, validated → moves to `processed/` + rows appear in Postgres + vectors in Qdrant
-- a **photo/selfie** → caught on the NPU glance → moves to `rejected/` (visible, recoverable — never deleted)
-- a **duplicate** → skipped instantly at the hash check
+---
+
+## ✅ Run it
+
+1. Drop a PDF or photo into `<docRoot>/incoming/`
+2. Watch it move: `incoming → processing → processed`
+3. In n8n, open **RAG Q&A (WF2)** and run it with a question, or use the webhook:
+
+```bash
+curl -X POST http://localhost:5678/webhook/rag-query \
+  -H 'content-type: application/json' \
+  -d '{"query":"what was the total on the invoice?"}'
+```
+
+You should get a grounded answer plus the source file it came from.
+
+---
+
+## Optional — the web dashboard
+
+A local dashboard for uploading documents and chatting with them.
+
+```bash
+cd web
+npm install
+cp .env.local.example .env.local     # then edit it
+npm run dev                          # http://localhost:3000
+```
+
+Set two things in `.env.local`:
+- `WATCH_DIR` — **exactly** the docRoot from Step 3
+- `PGUSER` / `PGPASSWORD` — your PostgreSQL login
+
+> [!TIP]
+> The **Home** page has a connection panel that checks every link — folders, database, gateway, workflows — and tells you the exact fix for anything that's broken. Start there if something doesn't work.
 
 ---
 
 ## The custom nodes
 
-- **OpenVINO Model Server** — `Classify Document` (CLIP triage on NPU), `Document Inference` (VLM OCR), `Embeddings`, `Chat Completion`, `Predict`, model status. Target device selectable (CPU/GPU/NPU/AUTO).
-- **OpenVINO Agent** — a local ReAct loop over the document text with built-in tools (extract fields, validate totals, coverage check, flag for review, dedup, recall).
+**OpenVINO Model Server** — one node, several operations:
 
-## Device layout (recommended)
+| Operation | What it does |
+|---|---|
+| Classify Document | zero-shot triage — is this a processable document? |
+| Document Inference | PDF/image → text (text layer for digital PDFs, VLM OCR for scans) |
+| Embeddings | text → 768-dim vector for search |
+| Chat Completion | prompt → answer |
+| Transcribe / Speak | speech ↔ text (optional; needs `--asr-model` / `--tts-model`) |
+| Predict · List Models · Get Status | classic model serving |
 
-| Stage | Chip | Why |
-|---|---|---|
-| Document triage (CLIP) | **NPU** | tiny, fast, the right chip for a cheap "glance" |
-| OCR (Qwen2.5-VL) | **GPU** | accuracy on layout/tables/degraded scans |
-| Agent (Qwen3-8B) | **GPU** | throughput for the reasoning loop |
-| Embeddings (BGE) | CPU | light, runs anywhere |
+**OpenVINO Agent** — a reasoning loop with built-in tools for extraction, validation and duplicate checking.
+
+Every operation has a **Target Device** dropdown: `CPU`, `GPU`, `NPU` or `AUTO`.
+
+---
+
+## Device layout
+
+What runs where by default, and why:
+
+| Model | Job | Device | Why there |
+|---|---|---|---|
+| CLIP ViT-B/32 | is this a document? | **NPU** | tiny, constant-shape, ~20 ms — perfect NPU work |
+| Qwen2.5-VL-7B | read the document | **GPU** | large vision model, needs the throughput |
+| Qwen3-8B | reason and answer | **GPU** | same |
+| BGE-base-en-v1.5 | search embeddings | **CPU** | small and frequent; keeps the GPU free |
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `Unrecognized node type: CUSTOM.openVinoModelServer` | `N8N_CUSTOM_EXTENSIONS` not set in the terminal running n8n — see Step 6 |
+| Documents stay in `incoming/` | the pipeline workflow isn't **Active**, or `docRoot` doesn't match your folder |
+| First document fails at the storage step | `setup_qdrant.py` wasn't run — see Step 4 |
+| Search misses exact IDs like `INV-2024-0891` | the full-text index is missing — re-run `setup_qdrant.py` |
+| `CLIP triage failed on NPU` | your machine has no NPU — use `--clip-device GPU`; the pipeline still works |
+| Answers say "no documents stored yet" | nothing has been processed yet, or Qdrant was cleared |
+| Everything is slow on the first run | models compile for your hardware once — later runs are much faster |
+
+---
 
 ## Containers (Linux, experimental)
 
-A Podman stack (`deployment/podman-compose.yml` + `gateway.Dockerfile`) is provided for Linux users who prefer containers — Intel device passthrough works on native Linux. **It is not yet verified end-to-end** (native is the tested path); GPU is the default, NPU-in-container is best-effort. See the comments in `deployment/podman-compose.yml`.
+A Podman stack (`deployment/podman-compose.yml` + `gateway.Dockerfile`) is provided for Linux users who prefer containers, where Intel device passthrough works.
+
+> [!WARNING]
+> **Not verified end-to-end**, and **not usable on Windows** — Windows containers run inside a WSL2 VM that cannot reach the NPU. Native is the tested path on both Windows and Linux.
+
+---
 
 ## Development
+
 ```bash
 npm run dev     # tsc --watch
 npm test        # unit tests (Jest)
