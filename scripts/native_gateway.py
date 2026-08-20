@@ -22,12 +22,14 @@ Setup (PowerShell):
 """
 import argparse
 import base64
+import io
 import json
 import math
 import os
 import re
 import threading
 import time
+import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
@@ -61,6 +63,11 @@ CLIP_LOGIT_SCALE = 100.0  # CLIP temperature (exp(logit_scale)) from the export
 CLIP_DEVICE = None        # the chip CLIP is compiled on (NPU by default)
 API_KEY = ""              # if set, every request must send Authorization: Bearer <API_KEY>
 DEBUG_PROMPT = False      # --debug-prompt: dump the exact prompt sent to the LLM (agent debugging)
+ASR = None                # openvino-genai WhisperPipeline (speech-to-text), or None
+ASR_DEVICE = None         # chip Whisper is compiled on
+TTS = None                # openvino-genai Text2SpeechPipeline (text-to-speech), or None
+TTS_DEVICE = None         # chip SpeechT5 is compiled on
+TTS_SPEAKER = None        # optional speaker embedding np.float32[512] for the TTS voice, or None
 INFER_LOCK = threading.Lock()  # OV infer requests are not concurrency-safe; serialize all inference
 
 # ===========================================================================
@@ -570,6 +577,23 @@ def strip_think(text):
     return re.sub(r"</?think>", "", text).strip()
 
 
+def generate_text(prompt, max_new_tokens):
+    """Greedy decoding on an 8B can slide into a low-diversity attractor: the answer starts fine,
+    then degenerates into an endless run-on of generic filler that never reaches a stop token.
+    repetition_penalty alone does not catch it, because the text never repeats exactly - it just
+    drifts. no_repeat_ngram_size forbids re-emitting any 4-token sequence, which breaks the loop
+    without introducing sampling randomness (the judge and extraction paths depend on determinism).
+    Kwargs are applied best-effort so older openvino-genai builds still work."""
+    for kwargs in ({"repetition_penalty": 1.3, "no_repeat_ngram_size": 4},
+                   {"repetition_penalty": 1.3},
+                   {}):
+        try:
+            return str(LLM.generate(prompt, max_new_tokens=max_new_tokens, **kwargs))
+        except Exception:
+            continue
+    return str(LLM.generate(prompt, max_new_tokens=max_new_tokens))
+
+
 def messages_from_responses(data):
     """Build chat messages from an OpenAI Responses-API request (n8n's Tools Agent uses /responses)."""
     messages = []
@@ -599,6 +623,64 @@ def messages_from_responses(data):
                     text = str(content)
                 messages.append({"role": role, "content": text})
     return messages
+
+
+# ===========================================================================
+# Speech: ASR (Whisper) + TTS (SpeechT5) via openvino-genai — the voice layer.
+# Both are optional and flag-gated (only loaded if a model dir is passed), so the tested
+# OCR/LLM/embeddings path is untouched when voice isn't configured.
+# ===========================================================================
+def _wav_to_16k_mono(raw):
+    """Decode PCM16 WAV bytes -> float32 mono @16kHz for Whisper. Handles stereo + resample.
+    The browser records at 16kHz mono WAV, so the resample path is usually a no-op."""
+    with wave.open(io.BytesIO(raw), "rb") as w:
+        n_ch, sw, sr, n_frames = w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()
+        pcm = w.readframes(n_frames)
+    if sw != 2:
+        raise ValueError(f"expected 16-bit PCM WAV, got {sw * 8}-bit")
+    audio = np.frombuffer(pcm, np.int16).astype(np.float32) / 32768.0
+    if n_ch > 1:
+        audio = audio.reshape(-1, n_ch).mean(axis=1)
+    if sr != 16000 and len(audio):
+        n_out = int(round(len(audio) * 16000 / sr))
+        audio = np.interp(np.linspace(0, len(audio), n_out, endpoint=False),
+                          np.arange(len(audio)), audio).astype(np.float32)
+    return np.ascontiguousarray(audio, dtype=np.float32)
+
+
+def _float_to_wav_bytes(waveform, sr=16000):
+    """Encode a float32 [-1,1] mono waveform -> 16-bit PCM WAV bytes (base64-able for the browser)."""
+    arr = np.clip(np.asarray(waveform, dtype=np.float32).reshape(-1), -1.0, 1.0)
+    pcm = (arr * 32767.0).round().astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def transcribe(raw_audio):
+    """Whisper ASR: WAV bytes -> text."""
+    audio = _wav_to_16k_mono(raw_audio)
+    res = ASR.generate(audio)
+    try:                       # WhisperPipeline returns DecodedResults across builds
+        text = res.texts[0]
+    except Exception:
+        text = str(res)
+    return str(text).strip()
+
+
+def synthesize(text):
+    """SpeechT5 TTS: text -> WAV bytes (16kHz mono)."""
+    res = TTS.generate(text, TTS_SPEAKER) if TTS_SPEAKER is not None else TTS.generate(text)
+    speeches = getattr(res, "speeches", None)
+    if speeches:               # list of ov.Tensor waveforms; take the first
+        wav = np.array(speeches[0].data, dtype=np.float32).reshape(-1)
+    else:
+        wav = np.asarray(res, dtype=np.float32).reshape(-1)
+    return _float_to_wav_bytes(wav, 16000)
 
 
 # ===========================================================================
@@ -638,7 +720,8 @@ class Handler(BaseHTTPRequestHandler):
                 available = []
             self._json(200, {"status": "ok", "ocr_engine": OCR_ENGINE, "ocr_device": CURRENT_OCR_DEVICE,
                              "available_devices": available, "embeddings": EMBED is not None,
-                             "super_resolution": SR is not None})
+                             "super_resolution": SR is not None,
+                             "asr": ASR is not None, "tts": TTS is not None})
         else:
             self._json(404, {"error": "not found"})
 
@@ -685,10 +768,7 @@ class Handler(BaseHTTPRequestHandler):
                 prompt = build_prompt(msgs, tools) if tools else flatten(msgs) + " /no_think"
                 mnt = int(req.get("max_tokens", 512))
                 with INFER_LOCK:
-                    try:  # repetition_penalty curbs runaway repetition loops; not all builds accept the kwarg
-                        text = str(LLM.generate(prompt, max_new_tokens=mnt, repetition_penalty=1.3))
-                    except Exception:
-                        text = str(LLM.generate(prompt, max_new_tokens=mnt))
+                    text = generate_text(prompt, mnt)
                 text = strip_think(text)
                 # Only look for a tool call when the caller actually offered tools - clients that pass
                 # none (e.g. the custom OpenVINO Agent node, which runs its own ReAct loop) keep the
@@ -722,10 +802,7 @@ class Handler(BaseHTTPRequestHandler):
                     print("  [PROMPT >>>]\n" + prompt + "\n  [<<< PROMPT]")
                 mnt = int(req.get("max_output_tokens", req.get("max_tokens", 512)))
                 with INFER_LOCK:
-                    try:
-                        text = str(LLM.generate(prompt, max_new_tokens=mnt, repetition_penalty=1.3))
-                    except Exception:
-                        text = str(LLM.generate(prompt, max_new_tokens=mnt))
+                    text = generate_text(prompt, mnt)
                 text = strip_think(text)
                 base = {"id": f"resp_{int(time.time()*1000)}", "object": "response", "created_at": int(time.time()),
                         "model": req.get("model", LLM_NAME), "status": "completed",
@@ -744,6 +821,33 @@ class Handler(BaseHTTPRequestHandler):
                     base["output_text"] = text
                     print(f"  [LLM /responses] {len(text)} chars in {(time.time()-t0):.1f}s")
                 self._json(200, base)
+            elif "audio/transcriptions" in self.path:
+                if ASR is None:
+                    self._json(503, {"error": "ASR not loaded (start the gateway with --asr-model)"})
+                    return
+                raw = base64.b64decode(req.get("audio") or req.get("data") or "")
+                if not raw:
+                    self._json(400, {"error": "no audio provided (send base64 16k-mono WAV as 'audio')"})
+                    return
+                with INFER_LOCK:
+                    text = transcribe(raw)
+                ms = round((time.time() - t0) * 1000, 1)
+                print(f"  [ASR {ASR_DEVICE}] {len(text)} chars in {ms:.0f}ms")
+                self._json(200, {"text": text, "device": ASR_DEVICE, "inference_time_ms": ms})
+            elif "audio/speech" in self.path:
+                if TTS is None:
+                    self._json(503, {"error": "TTS not loaded (start the gateway with --tts-model)"})
+                    return
+                text = str(req.get("input") or req.get("text") or "").strip()
+                if not text:
+                    self._json(400, {"error": "no text provided (send 'input')"})
+                    return
+                with INFER_LOCK:
+                    wav = synthesize(text)
+                ms = round((time.time() - t0) * 1000, 1)
+                print(f"  [TTS {TTS_DEVICE}] {len(text)} chars -> {len(wav)} bytes in {ms:.0f}ms")
+                self._json(200, {"audio": base64.b64encode(wav).decode(), "format": "wav",
+                                 "sample_rate": 16000, "device": TTS_DEVICE, "inference_time_ms": ms})
             else:
                 self._json(404, {"error": "unknown endpoint"})
         except Exception as e:
@@ -757,6 +861,7 @@ def main():
     global DET, REC, CTC_CHARS, LLM, EMBED, OCR_DEVICE, DET_STATIC, OCR_ENGINE, HTD, RTR, SR, SR_MAX_SIDE, VLM
     global VLM_MODEL_DIR, MODELS_DIR, DET_DIR, REC_DIR, CURRENT_OCR_DEVICE, LLM_NAME
     global CLIP, CLIP_TEXT_EMB, CLIP_IS_DOC, CLIP_LABELS, CLIP_LOGIT_SCALE, CLIP_DEVICE, API_KEY, DEBUG_PROMPT
+    global ASR, ASR_DEVICE, TTS, TTS_DEVICE, TTS_SPEAKER
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", required=True, help="dir with ppocr-det/rec + dict (or htd/rtr for omz)")
     ap.add_argument("--llm", default="qwen3-8b-ov", help="openvino-genai model dir")
@@ -778,6 +883,11 @@ def main():
                     help="print the exact prompt sent to the LLM on tool-calling requests (agent debugging)")
     ap.add_argument("--api-key", default=os.environ.get("GATEWAY_API_KEY", ""),
                     help="require 'Authorization: Bearer <key>' on every request (set this when binding to 0.0.0.0)")
+    ap.add_argument("--asr-model", default="", help="Whisper IR dir for speech-to-text (openvino-genai WhisperPipeline). Omit to disable /v1/audio/transcriptions.")
+    ap.add_argument("--asr-device", default="CPU", help="chip for Whisper ASR (CPU/GPU/NPU)")
+    ap.add_argument("--tts-model", default="", help="SpeechT5 IR dir for text-to-speech (openvino-genai Text2SpeechPipeline). Omit to disable /v1/audio/speech.")
+    ap.add_argument("--tts-device", default="CPU", help="chip for SpeechT5 TTS (CPU/GPU)")
+    ap.add_argument("--tts-speaker", default="", help="optional .npy speaker embedding (512 float32) for the TTS voice")
     ap.add_argument("--port", type=int, default=8000)
     a = ap.parse_args()
     OCR_DEVICE = a.ocr_device
@@ -861,6 +971,32 @@ def main():
         EMBED = (AutoTokenizer.from_pretrained(a.bge), OVModelForFeatureExtraction.from_pretrained(a.bge))
     except Exception as e:
         print(f"  Embeddings disabled ({e}) -- OCR + LLM still work. Install optimum[openvino] to enable.")
+
+    # Voice layer — both optional & graceful (only load if a model dir is given; failure -> endpoint 503s).
+    if a.asr_model:
+        try:
+            import openvino_genai as og
+            ASR = og.WhisperPipeline(a.asr_model, a.asr_device)
+            ASR_DEVICE = a.asr_device
+            print(f"ASR (Whisper) -> {a.asr_device} from {a.asr_model}")
+        except Exception as e:
+            ASR = None
+            print(f"  ASR disabled ({type(e).__name__}: {e}) -- /v1/audio/transcriptions will 503")
+    else:
+        print("ASR (Whisper) not configured -- pass --asr-model to enable speech-to-text")
+    if a.tts_model:
+        try:
+            import openvino_genai as og
+            TTS = og.Text2SpeechPipeline(a.tts_model, a.tts_device)
+            TTS_DEVICE = a.tts_device
+            if a.tts_speaker and os.path.exists(a.tts_speaker):
+                TTS_SPEAKER = np.load(a.tts_speaker).astype(np.float32).reshape(-1)
+            print(f"TTS (SpeechT5) -> {a.tts_device} from {a.tts_model}{' + speaker emb' if TTS_SPEAKER is not None else ''}")
+        except Exception as e:
+            TTS = None
+            print(f"  TTS disabled ({type(e).__name__}: {e}) -- /v1/audio/speech will 503")
+    else:
+        print("TTS (SpeechT5) not configured -- pass --tts-model to enable text-to-speech")
 
     API_KEY = a.api_key
     DEBUG_PROMPT = a.debug_prompt

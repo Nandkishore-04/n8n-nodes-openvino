@@ -93,6 +93,8 @@ export class OpenVinoModelServer implements INodeType {
 					{ name: 'Get Model Status',   value: 'modelStatus',       description: 'Per-model readiness check',            action: 'Get model status' },
 					{ name: 'List Models',        value: 'listModels',        description: 'List all models served by OVMS',       action: 'List models' },
 					{ name: 'Predict',            value: 'predict',           description: 'Run inference on a classic model',     action: 'Run inference on a classic model' },
+					{ name: 'Speak (Text to Speech)',      value: 'speak',      description: 'Text → speech audio (SpeechT5 on OpenVINO)', action: 'Synthesize speech from text' },
+					{ name: 'Transcribe (Speech to Text)', value: 'transcribe', description: 'Audio → text (Whisper on OpenVINO)',         action: 'Transcribe speech to text' },
 				],
 				default: 'predict',
 			},
@@ -141,9 +143,9 @@ export class OpenVinoModelServer implements INodeType {
 				name: 'binaryProperty',
 				type: 'string',
 				default: 'data',
-				description: 'Name of the binary property holding the PDF/image to OCR or classify',
+				description: 'Name of the binary property holding the PDF/image to OCR/classify, or the WAV audio to transcribe',
 				displayOptions: {
-					show: { operation: ['documentInference', 'classifyDocument'] },
+					show: { operation: ['documentInference', 'classifyDocument', 'transcribe'] },
 				},
 			},
 			{
@@ -242,6 +244,38 @@ export class OpenVinoModelServer implements INodeType {
 				default: '',
 				description: 'Text to convert into a 768-dim BGE vector (e.g. a document chunk to store, or a query to search)',
 				displayOptions: { show: { operation: ['embeddings'] } },
+			},
+
+			// ── Transcribe (Speech to Text) params ───────────────────────
+			{
+				displayName: 'Audio Source',
+				name: 'audioSource',
+				type: 'options',
+				options: [
+					{ name: 'Binary Property', value: 'binary', description: 'Read WAV bytes from an input binary property' },
+					{ name: 'Base64 String',   value: 'base64', description: 'Read a base64 WAV from a field/expression (e.g. a webhook body)' },
+				],
+				default: 'binary',
+				displayOptions: { show: { operation: ['transcribe'] } },
+			},
+			{
+				displayName: 'Audio (Base64 WAV)',
+				name: 'audioBase64',
+				type: 'string',
+				default: '',
+				description: 'Base64-encoded 16kHz mono WAV (a data: URI prefix is stripped automatically)',
+				displayOptions: { show: { operation: ['transcribe'], audioSource: ['base64'] } },
+			},
+
+			// ── Speak (Text to Speech) params ─────────────────────────────────────
+			{
+				displayName: 'Text to Speak',
+				name: 'speakText',
+				type: 'string',
+				typeOptions: { rows: 3 },
+				default: '',
+				description: 'Text to synthesize into speech (SpeechT5 via the gateway). Returns a 16kHz WAV in the binary "data" property (and base64 in the JSON).',
+				displayOptions: { show: { operation: ['speak'] } },
 			},
 
 			// ── AUTO plugin ───────────────────────────────────────────────────────
@@ -481,6 +515,51 @@ export class OpenVinoModelServer implements INodeType {
 					}
 
 				// ── unknown operation ───────────────────────────────────────────────
+				} else if (operation === 'transcribe') {
+					const audioSource = this.getNodeParameter('audioSource', i, 'binary') as string;
+					let audioB64: string;
+					let fileName = 'audio.wav';
+					if (audioSource === 'base64') {
+						audioB64 = this.getNodeParameter('audioBase64', i, '') as string;
+					} else {
+						const binaryProperty = this.getNodeParameter('binaryProperty', i) as string;
+						const binary = this.helpers.assertBinaryData(i, binaryProperty);
+						audioB64 = (await this.helpers.getBinaryDataBuffer(i, binaryProperty)).toString('base64');
+						fileName = binary.fileName ?? 'audio.wav';
+					}
+					audioB64 = audioB64.replace(/^data:[^;]+;base64,/, '');
+					this.logger.info(`[openvino:transcribe] ${fileName} → ${credentials.gatewayUrl}/v1/audio/transcriptions`);
+					const resp = await this.helpers.httpRequest({
+						method: 'POST',
+						url: `${credentials.gatewayUrl}/v1/audio/transcriptions`,
+						headers: restHeaders,
+						body: { audio: audioB64, filename: fileName, device: targetDevice },
+						json: true,
+						timeout: timeoutSec * 1000,
+					}) as any;
+					result = { text: resp?.text ?? '', device: resp?.device, inference_time_ms: resp?.inference_time_ms };
+
+				} else if (operation === 'speak') {
+					const speakText = this.getNodeParameter('speakText', i) as string;
+
+					this.logger.info(`[openvino:speak] ${speakText.length} chars → ${credentials.gatewayUrl}/v1/audio/speech`);
+					const resp = await this.helpers.httpRequest({
+						method: 'POST',
+						url: `${credentials.gatewayUrl}/v1/audio/speech`,
+						headers: restHeaders,
+						body: { input: speakText, device: targetDevice },
+						json: true,
+						timeout: timeoutSec * 1000,
+					}) as any;
+					const audioB64 = (resp?.audio ?? '') as string;
+					const bin = await this.helpers.prepareBinaryData(Buffer.from(audioB64, 'base64'), 'speech.wav', 'audio/wav');
+					results.push({
+						json: { format: resp?.format ?? 'wav', sampleRate: resp?.sample_rate ?? 16000, device: resp?.device, audioBase64: audioB64 } as unknown as IDataObject,
+						binary: { data: bin },
+						pairedItem: { item: i },
+					});
+					continue;
+
 				} else {
 					throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, { itemIndex: i });
 				}
