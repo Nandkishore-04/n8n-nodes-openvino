@@ -28,6 +28,12 @@ Custom [n8n](https://n8n.io) nodes + a native [OpenVINO™](https://docs.openvin
 
 ---
 
+## Demo
+
+[Watch it run](https://drive.google.com/drive/folders/1WgsaEkTnMBHCK2JUDPwpSIlLVmPYLnd-?usp=sharing) — document processing on the NPU/GPU, and grounded Q&A over the processed documents.
+
+---
+
 ## Hardware requirements
 
 > [!IMPORTANT]
